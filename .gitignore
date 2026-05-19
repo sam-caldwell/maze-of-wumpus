@@ -1,0 +1,32 @@
+# Build output
+build/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Logs
+*.log
+
+# Test output / artifacts
+*.test
+*.out
+*.prof
+coverage.txt
+coverage.html
+
+# Go workspace
+go.work
+go.work.sum
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Local environment overrides
+.env
+.env.local
