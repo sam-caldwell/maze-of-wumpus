@@ -14,6 +14,9 @@ import (
 
 // BayesianStrategy is the entry-point for agent A.
 func BayesianStrategy(w *world.World, a *world.Agent) world.Pos {
+	if step, ok := w.CachedStepFor(a); ok {
+		return step
+	}
 	UpdateAgentBeliefs(w, a)
 	if len(a.Plan) == 0 || !wwCellOK(w, a, a.Plan[0]) {
 		a.Plan = wwPlanPath(w, a)
@@ -27,10 +30,11 @@ func BayesianStrategy(w *world.World, a *world.Agent) world.Pos {
 }
 
 // wwCellOK reports whether `p` is strictly safe to enter under the
-// agent's KB. Safe iff walkable, no known pit, no current stench,
-// AND either visited OR inductively proven pit-free.
+// agent's KB. Safe iff perceived (in `a.KnownCells`), walkable, no
+// known pit, no current stench, AND either visited OR inductively
+// proven pit-free.
 func wwCellOK(w *world.World, a *world.Agent, p world.Pos) bool {
-	if !world.InBounds(p.X, p.Y) || !w.Maze.IsWalkable(p) {
+	if !knownWalkable(w, a, p) {
 		return false
 	}
 	if a.Beliefs == nil {
@@ -48,9 +52,10 @@ func wwCellOK(w *world.World, a *world.Agent, p world.Pos) bool {
 	return a.Beliefs.SafeFromPit[p]
 }
 
-// wwCellOKLoose: relaxed "calculated risk" predicate.
+// wwCellOKLoose: relaxed "calculated risk" predicate. Still gated on
+// `a.KnownCells` — the agent never routes through unseen cells.
 func wwCellOKLoose(w *world.World, a *world.Agent, p world.Pos) bool {
-	if !world.InBounds(p.X, p.Y) || !w.Maze.IsWalkable(p) {
+	if !knownWalkable(w, a, p) {
 		return false
 	}
 	if a.Beliefs == nil {
@@ -65,38 +70,57 @@ func wwCellOKLoose(w *world.World, a *world.Agent, p world.Pos) bool {
 	return true
 }
 
-// wwPlanPath runs the four-stage decision pipeline.
+// wwPlanPath runs the strict-PO decision pipeline. Crucially the
+// agent NEVER reads w.Maze.GoalPos until it has perceived the goal
+// cell (added to KnownCells via MarkAgentSensed). Before then it
+// expands purely via frontier exploration.
 //
 //  0. WATER (if NeedsWater): try a strict-safe BFS to the nearest
 //     water pit. Water is "free life insurance" — grab it whenever
-//     a proven-safe path exists. Falls through to (1) if no such
-//     path exists; the agent doesn't abandon the goal long-term.
-//  1. STRICT goal: BFS to goal through proven-safe cells only.
+//     a proven-safe path exists.
+//  1. GOAL (only if KnownCells already contains the goal cell —
+//     i.e. some agent past life sensed it OR this life perceived
+//     it via the sensing radius): strict-safe BFS to goal.
 //  2. FRONTIER: walk to the nearest safe-but-unvisited cell.
-//  3. RISK: relaxed predicate, plan toward goal anyway.
+//  3. RISK FALLBACK: if goal is perceived, try a relaxed path to
+//     it. Otherwise loose-predicate frontier expansion.
 func wwPlanPath(w *world.World, a *world.Agent) []world.Pos {
-	goal := w.Maze.GoalPos
-	if NeedsWater(w, a) {
-		if pit, ok := NearestWaterPit(w, a.Pos); ok {
+	if NeedsKnownWater(w, a) {
+		if pit, ok := NearestKnownWaterPit(w, a, a.Pos); ok {
 			if p := wwBFS(w, a, a.Pos, pit, true); len(p) > 0 {
 				return p
 			}
 		}
 	}
-	if p := wwBFS(w, a, a.Pos, goal, true); len(p) > 0 {
-		return p
+	goalPerceived := a.KnownCells != nil && a.KnownCells[w.Maze.GoalPos]
+	if goalPerceived {
+		if p := wwBFS(w, a, a.Pos, w.Maze.GoalPos, true); len(p) > 0 {
+			return p
+		}
 	}
 	if frontier, ok := wwNearestSafeFrontier(w, a); ok {
 		if p := wwBFS(w, a, a.Pos, frontier, true); len(p) > 0 {
 			return p
 		}
 	}
-	return wwBFS(w, a, a.Pos, goal, false)
+	if goalPerceived {
+		return wwBFS(w, a, a.Pos, w.Maze.GoalPos, false)
+	}
+	if frontier, ok := wwNearestSafeFrontier(w, a); ok {
+		return wwBFS(w, a, a.Pos, frontier, false)
+	}
+	return nil
 }
 
-// wwBFS: BFS through cells permitted by the chosen predicate. The
-// destination cell is always considered legal so plans can end at
-// the goal even if it's unknown to the KB.
+// wwBFS finds a min-cost path through cells permitted by the
+// chosen Wumpus-World safety predicate. Strict mode uses wwCellOK
+// (proven-safe only); loose mode uses wwCellOKLoose (no proven
+// pit). The destination cell is always considered legal so plans
+// can end at the goal even if it's unknown to the KB.
+//
+// Despite the historical "BFS" name, this is a Dijkstra call —
+// edges are weighted (cardinal=10, diagonal=14) and corner-clipping
+// is enforced, matching the global movement model.
 func wwBFS(w *world.World, a *world.Agent, from, to world.Pos, strict bool) []world.Pos {
 	if from == to {
 		return nil
@@ -105,40 +129,15 @@ func wwBFS(w *world.World, a *world.Agent, from, to world.Pos, strict bool) []wo
 	if strict {
 		okFn = wwCellOK
 	}
-	type node struct {
-		world.Pos
-		parent int
-	}
-	nodes := []node{{from, -1}}
-	visited := map[world.Pos]int{from: 0}
-	for head := 0; head < len(nodes); head++ {
-		cur := nodes[head]
-		if cur.Pos == to {
-			var path []world.Pos
-			for i := head; i != -1; i = nodes[i].parent {
-				path = append([]world.Pos{nodes[i].Pos}, path...)
-			}
-			if len(path) > 0 && path[0] == from {
-				path = path[1:]
-			}
-			return path
+	return w.DijkstraPath(from, to, func(p world.Pos) bool {
+		if !knownWalkable(w, a, p) {
+			return false
 		}
-		for _, d := range world.Cardinals {
-			np := world.Pos{X: cur.X + d.X, Y: cur.Y + d.Y}
-			if !w.Maze.IsWalkable(np) {
-				continue
-			}
-			if _, seen := visited[np]; seen {
-				continue
-			}
-			if np != to && !okFn(w, a, np) {
-				continue
-			}
-			visited[np] = len(nodes)
-			nodes = append(nodes, node{np, head})
+		if p == to {
+			return true
 		}
-	}
-	return nil
+		return okFn(w, a, p)
+	})
 }
 
 // wwNearestSafeFrontier walks the safe-set BFS from the agent's
@@ -154,7 +153,7 @@ func wwNearestSafeFrontier(w *world.World, a *world.Agent) (world.Pos, bool) {
 		queue = queue[1:]
 		for _, d := range world.Cardinals {
 			np := world.Pos{X: cur.X + d.X, Y: cur.Y + d.Y}
-			if !w.Maze.IsWalkable(np) {
+			if !knownWalkable(w, a, np) {
 				continue
 			}
 			if visited[np] {

@@ -57,17 +57,23 @@ func TestE2E_HeadlessOutputFormat(t *testing.T) {
 	if len(lines) < 1 {
 		t.Fatalf("no output lines")
 	}
-	re := regexp.MustCompile(
-		`^cycle=(\d+) wumpus_died=\d+ wumpus_alive=\d+ optimal=\d+ paths=\d+ ` +
-			`1_alive=(true|false) 1_deaths=\d+ 1_kills=\d+ 1_goals=\d+ 1_dist=\d+ 1_score=-?\d+\.\d+ ` +
-			`2_alive=(true|false) 2_deaths=\d+ 2_kills=\d+ 2_goals=\d+ 2_dist=\d+ 2_score=-?\d+\.\d+ ` +
-			`3_alive=(true|false) 3_deaths=\d+ 3_kills=\d+ 3_goals=\d+ 3_dist=\d+ 3_score=-?\d+\.\d+ ` +
-			`4_alive=(true|false) 4_deaths=\d+ 4_kills=\d+ 4_goals=\d+ 4_dist=\d+ 4_score=-?\d+\.\d+ ` +
-			`5_alive=(true|false) 5_deaths=\d+ 5_kills=\d+ 5_goals=\d+ 5_dist=\d+ 5_score=-?\d+\.\d+ ` +
-			`6_alive=(true|false) 6_deaths=\d+ 6_kills=\d+ 6_goals=\d+ 6_dist=\d+ 6_score=-?\d+\.\d+ ` +
-			`7_alive=(true|false) 7_deaths=\d+ 7_kills=\d+ 7_goals=\d+ 7_dist=\d+ 7_score=-?\d+\.\d+ ` +
-			`game_over=(true|false)$`,
-	)
+	// Build a per-agent matcher fragment for each label in the
+	// current 12-agent lineup so the regex stays in lockstep with
+	// any future renumbering.
+	agentPattern := func(label string) string {
+		return label + `_alive=(true|false) ` +
+			label + `_deaths=\d+ ` +
+			label + `_kills=\d+ ` +
+			label + `_goals=\d+ ` +
+			label + `_dist=\d+ ` +
+			label + `_score=-?\d+\.\d+ `
+	}
+	pat := `^cycle=(\d+) wumpus_died=\d+ wumpus_alive=\d+ optimal=\d+ paths=\d+ `
+	for _, l := range []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "A", "B", "C"} {
+		pat += agentPattern(l)
+	}
+	pat += `game_over=(true|false)$`
+	re := regexp.MustCompile(pat)
 	for i, ln := range lines {
 		m := re.FindStringSubmatch(ln)
 		if m == nil {

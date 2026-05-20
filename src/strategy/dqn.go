@@ -13,8 +13,24 @@ const (
 	DqnEpsilon   = 0.05
 )
 
+// directionAction maps a from-to one-step transition back to the
+// action index in world.Cardinals (or 0 if the step isn't a cardinal
+// neighbor, which shouldn't happen in practice).
+func directionAction(from, to world.Pos) int {
+	dx, dy := to.X-from.X, to.Y-from.Y
+	for i, d := range world.Cardinals {
+		if d.X == dx && d.Y == dy {
+			return i
+		}
+	}
+	return 0
+}
+
 // DQNStrategy: the entry-point for agent E.
 func DQNStrategy(w *world.World, a *world.Agent) world.Pos {
+	if step, ok := w.CachedStepFor(a); ok {
+		return step
+	}
 	if a.DQN == nil {
 		a.DQN = world.NewDQN(w.Rng)
 	}

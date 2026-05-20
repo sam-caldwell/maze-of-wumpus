@@ -27,7 +27,8 @@ func TestStep_DoesNotPanic(t *testing.T) {
 	w.EnableAllAgents()
 	for i := 0; i < 1000; i++ {
 		w.Step()
-		seen := map[Pos]string{}
+		// Agents are now allowed to share cells (overlap is permitted),
+		// so we only check bounds — not uniqueness — of their positions.
 		for _, a := range w.Agents {
 			if !a.Alive {
 				continue
@@ -35,10 +36,6 @@ func TestStep_DoesNotPanic(t *testing.T) {
 			if !InBounds(a.Pos.X, a.Pos.Y) {
 				t.Fatalf("agent %c OOB at %v step %d", a.Label, a.Pos, i)
 			}
-			if existing, ok := seen[a.Pos]; ok {
-				t.Fatalf("step %d: agent %c overlaps %s at %v", i, a.Label, existing, a.Pos)
-			}
-			seen[a.Pos] = string(a.Label)
 		}
 		for _, wm := range w.Wumpus {
 			if !wm.Alive {
@@ -114,29 +111,31 @@ func TestGoalRespawnsAgent(t *testing.T) {
 	}
 }
 
-// TestScore_Formula: Score returns max(live, best). Live ratio is
-// (OnPath - OffPath) / Optimal. BestAlignment is a sticky maximum.
+// TestScore_Formula: Score is cumulative goals per cycle.
 func TestScore_Formula(t *testing.T) {
 	tests := []struct {
-		name    string
-		s       AgentStats
-		optimal int
-		want    float64
+		name  string
+		s     AgentStats
+		cycle int
+		want  float64
 	}{
-		{"never moved", AgentStats{}, 100, 0},
-		{"zero optimal returns 0", AgentStats{OnPathSteps: 10}, 0, 0},
-		{"all on path = 1.0",
-			AgentStats{OnPathSteps: 100, OffPathSteps: 0}, 100, 1.0},
-		{"all off path = -1.0",
-			AgentStats{OnPathSteps: 0, OffPathSteps: 100}, 100, -1.0},
-		{"half on / half off = 0",
-			AgentStats{OnPathSteps: 50, OffPathSteps: 50}, 100, 0.0},
-		{"BestAlignment does not affect live Score",
-			AgentStats{OnPathSteps: 10, OffPathSteps: 90, BestAlignment: 0.7}, 100, -0.8},
+		{"no goals, no cycles", AgentStats{}, 0, 0},
+		{"goals but cycle=0 returns 0",
+			AgentStats{GoalsReached: 5}, 0, 0},
+		{"no goals after N cycles = 0",
+			AgentStats{GoalsReached: 0}, 1000, 0.0},
+		{"1 goal in 100 cycles = 0.01",
+			AgentStats{GoalsReached: 1}, 100, 0.01},
+		{"5 goals in 1000 cycles = 0.005",
+			AgentStats{GoalsReached: 5}, 1000, 0.005},
+		{"OnPathSteps no longer influences Score",
+			AgentStats{GoalsReached: 2, OnPathSteps: 1000,
+				OffPathSteps: 5000, BestAlignment: 0.7}, 200, 0.01},
 	}
 	for _, tc := range tests {
-		if got := tc.s.Score(tc.optimal); got != tc.want {
-			t.Errorf("%s: Score() = %v, want %v", tc.name, got, tc.want)
+		if got := tc.s.Score(tc.cycle); got != tc.want {
+			t.Errorf("%s: Score(%d) = %v, want %v",
+				tc.name, tc.cycle, got, tc.want)
 		}
 	}
 }
@@ -447,17 +446,22 @@ func TestFallbackMove_NoOptions(t *testing.T) {
 	}
 }
 
-func TestRespawnAgents_EntranceBlocked(t *testing.T) {
+// TestRespawnAgents_AllowsOverlapAtEntrance: agents may share the
+// entrance cell on respawn. Two agents both at the entrance is now
+// a valid steady state — used to be blocked.
+func TestRespawnAgents_AllowsOverlapAtEntrance(t *testing.T) {
 	w := NewWorld(56)
 	a := SpawnAgentForTest(w, '1')
 	b := w.AgentByLabel('2')
 	b.Alive = false
 	b.RespawnIn = 0
 	w.RespawnAgents()
-	if b.Alive {
-		t.Error("B should not spawn while A occupies entrance")
+	if !b.Alive {
+		t.Error("B should spawn even though A occupies entrance — overlap allowed")
 	}
-	_ = a
+	if a.Pos != b.Pos {
+		t.Errorf("both agents should be at entrance: A=%v B=%v", a.Pos, b.Pos)
+	}
 }
 
 func TestShortestPathLength_Unreachable(t *testing.T) {
@@ -584,22 +588,22 @@ func TestCountShortestPaths_SaturatesAtCap(t *testing.T) {
 	}
 }
 
-func TestAgentStrategy_PicksLabel(t *testing.T) {
+// TestAgentStrategy_UniversalSlots: every agent now carries the
+// full state union (Beliefs + DQN) so they can run any algorithm
+// per-journey.
+func TestAgentStrategy_UniversalSlots(t *testing.T) {
 	w := NewWorld(99)
-	if w.AgentByLabel('1').Beliefs == nil {
-		t.Error("agent A should have beliefs")
-	}
-	if w.AgentByLabel('2').Beliefs != nil {
-		t.Error("agent B should not have beliefs")
-	}
-	if w.AgentByLabel('3').Beliefs != nil {
-		t.Error("agent C should not have beliefs")
-	}
-	if w.AgentByLabel('4').QL == nil {
-		t.Error("agent D should have a Q-learning table")
-	}
-	if w.AgentByLabel('5').DQN == nil {
-		t.Error("agent E should have a DQN")
+	for _, l := range []rune{'1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C'} {
+		a := w.AgentByLabel(l)
+		if a == nil {
+			t.Fatalf("missing agent %c", l)
+		}
+		if a.Beliefs == nil {
+			t.Errorf("agent %c missing Beliefs", l)
+		}
+		if a.DQN == nil {
+			t.Errorf("agent %c missing DQN", l)
+		}
 	}
 }
 
@@ -778,9 +782,16 @@ func TestDeadEnd_EscalatingCost(t *testing.T) {
 	w.AgentAt[40][40] = a
 	w.Maze.Cells[40][40] = CellPath
 	w.Maze.Cells[40][41] = CellPath
-	w.Maze.Cells[39][41] = CellWall
-	w.Maze.Cells[41][41] = CellWall
-	w.Maze.Cells[40][42] = CellWall
+	// Wall off every other Moore neighbor of (41, 40) so it has
+	// exactly one walkable Moore neighbor — the cell at (40, 40).
+	// With 8-conn Cardinals the dead-end check looks at all 8
+	// directions.
+	for _, p := range []Pos{
+		{41, 39}, {42, 40}, {41, 41},
+		{40, 39}, {42, 39}, {40, 41}, {42, 41},
+	} {
+		w.Maze.Cells[p.Y][p.X] = CellWall
+	}
 	a.PendingBonus = 0
 	a.HasLastFrom = false
 	beforeCount := a.DeadEndCount

@@ -62,7 +62,9 @@ func TestBFSToward_Unreachable(t *testing.T) {
 
 func TestWaterOverride_TriggersWhenAppropriate(t *testing.T) {
 	// Try a handful of seeds: each yields different fire-pit / water
-	// layout. The override must fire on at least one.
+	// layout. The override must fire on at least one. Partial-
+	// observability now applies: the agent must have "seen" a water
+	// pit AND the corridor between it and itself. We hand-seed both.
 	for seed := int64(304); seed < 320; seed++ {
 		w := newConfiguredWorld(seed)
 		w.EnableHazards()
@@ -71,6 +73,20 @@ func TestWaterOverride_TriggersWhenAppropriate(t *testing.T) {
 		a.Water = 0
 		if len(w.Maze.WaterPits) == 0 {
 			continue
+		}
+		// Pretend agent has perceived every walkable cell so the
+		// water-override BFS can route through them. This isolates
+		// the test from the perception model — we're verifying
+		// override mechanics, not exploration coverage.
+		if a.KnownCells == nil {
+			a.KnownCells = map[world.Pos]bool{}
+		}
+		for y := 0; y < world.BoardHeight; y++ {
+			for x := 0; x < world.BoardWidth; x++ {
+				if w.Maze.IsWalkable(world.Pos{X: x, Y: y}) {
+					a.KnownCells[world.Pos{X: x, Y: y}] = true
+				}
+			}
 		}
 		step, ok := WaterOverride(w, a)
 		if !ok {
@@ -196,26 +212,8 @@ func TestDFSStrategy_TargetsWaterWhenLow(t *testing.T) {
 
 // TestQLearningStrategy_WaterOverride: D's chosen target should be
 // the first step of a BFS toward water when low.
-func TestQLearningStrategy_WaterOverride(t *testing.T) {
-	w := newConfiguredWorld(310)
-	w.EnableHazards()
-	killAllWumpus(w)
-	a := world.SpawnAgentForTest(w, '4')
-	a.Water = 0
-	if len(w.Maze.WaterPits) == 0 {
-		t.Skip("no water pits")
-	}
-	step, ok := WaterOverride(w, a)
-	if !ok {
-		t.Skip("no override available")
-	}
-	got := QLearningStrategy(w, a)
-	if got != step {
-		t.Errorf("Q-learning step = %v, want override step %v", got, step)
-	}
-}
-
-// TestDQNStrategy_WaterOverride mirrors for E.
+// TestDQNStrategy_WaterOverride: water-out + pit-exists → DQN must
+// step toward the nearest water pit instead of its network choice.
 func TestDQNStrategy_WaterOverride(t *testing.T) {
 	w := newConfiguredWorld(311)
 	w.EnableHazards()
@@ -244,7 +242,7 @@ func TestBayesianStrategy_TargetsWaterWhenLow(t *testing.T) {
 	w := newConfiguredWorld(312)
 	w.EnableHazards()
 	killAllWumpus(w)
-	a := world.SpawnAgentForTest(w, '1')
+	a := world.SpawnAgentForTest(w, '3')
 	a.Water = 0
 	// Pretend every walkable cell is SafeFromPit and Observed, so
 	// strict-safe BFS succeeds.

@@ -25,7 +25,18 @@ func branchTestWorld(t *testing.T, seed int64, label rune) (*world.World, *world
 	for _, d := range world.Cardinals {
 		np := world.Pos{X: a.Pos.X + d.X, Y: a.Pos.Y + d.Y}
 		w.Maze.Cells[np.Y][np.X] = world.CellPath
+		// Stamp out any fire pit that EnableHazards placed at this
+		// neighbor — branchCandidates filters hazards, and we need
+		// all four cardinals open for the test to produce a ≥2-way
+		// branch reliably regardless of seed.
+		w.ExtinguishFirePit(np)
 	}
+	// Force the goal to a cardinal neighbor so BFSStrategy can
+	// always produce a plan from this synthetic junction — without
+	// this, the test depends on the random maze actually connecting
+	// (40,40) to w.Maze.GoalPos, which broke whenever upstream
+	// changes shifted the RNG state.
+	w.Maze.GoalPos = world.Pos{X: 41, Y: 40}
 	a.HasLastFrom = false // no "back direction" — all 4 branches count
 	a.Plan = []world.Pos{{X: 41, Y: 40}}
 	return w, a

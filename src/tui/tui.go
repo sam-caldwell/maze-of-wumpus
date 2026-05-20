@@ -20,7 +20,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"maze-of-wumpus/src/logging"
 	"maze-of-wumpus/src/world"
 )
 
@@ -28,15 +27,22 @@ const tickInterval = 100 * time.Millisecond
 
 // Styles.
 var (
-	wallStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	pathStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("236"))
-	agent1Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
-	agent2Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true)
-	agent3Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("213")).Bold(true)
-	agent4Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Bold(true)
-	agent5Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
-	agent6Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true) // orange (POMDP)
-	agent7Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("177")).Bold(true) // pink (POMCP)
+	wallStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	pathStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("236"))
+	agent1Style = lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
+	agent2Style = lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true)
+	agent3Style = lipgloss.NewStyle().Foreground(lipgloss.Color("213")).Bold(true)
+	agent4Style = lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Bold(true)
+	agent5Style = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
+	agent6Style = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true) // orange (POMDP)
+	agent7Style = lipgloss.NewStyle().Foreground(lipgloss.Color("177")).Bold(true) // pink (POMCP)
+	// Far-sight variants: distinct hues kin to their short-sight
+	// counterpart but visually unambiguous on dark terminals.
+	agent8Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("165")).Bold(true) // magenta (Bayesian+fs)
+	agent9Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Bold(true)  // mid green (scent-follower+fs)
+	agentAStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Bold(true) // bright yellow (DQN+fs)
+	agentBStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("202")).Bold(true) // red-orange (POMCP+fs)
+	agentCStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Bold(true)  // purple-violet (QMDP+fs)
 	wumpusStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
 	firePitStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Background(lipgloss.Color("240")).Bold(true)
 	waterPitStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("21")).Background(lipgloss.Color("51")).Bold(true)
@@ -53,6 +59,11 @@ var (
 	scent5Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
 	scent6Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("208"))
 	scent7Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("177"))
+	scent8Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("165"))
+	scent9Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
+	scentAStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("226"))
+	scentBStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("202"))
+	scentCStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("99"))
 	titleStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
 	statStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
 	ttlWarnStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true)
@@ -75,6 +86,11 @@ var (
 	agent5Glyph   = agent5Style.Render("5")
 	agent6Glyph   = agent6Style.Render("6")
 	agent7Glyph   = agent7Style.Render("7")
+	agent8Glyph   = agent8Style.Render("8")
+	agent9Glyph   = agent9Style.Render("9")
+	agentAGlyph   = agentAStyle.Render("A")
+	agentBGlyph   = agentBStyle.Render("B")
+	agentCGlyph   = agentCStyle.Render("C")
 	wumpusGlyph   = wumpusStyle.Render("W")
 	firePitGlyph  = firePitStyle.Render("F")
 	waterPitGlyph = waterPitStyle.Render("W")
@@ -86,6 +102,11 @@ var (
 	scent5Glyph   = scent5Style.Render("~")
 	scent6Glyph   = scent6Style.Render("~")
 	scent7Glyph   = scent7Style.Render("~")
+	scent8Glyph   = scent8Style.Render("~")
+	scent9Glyph   = scent9Style.Render("~")
+	scentAGlyph   = scentAStyle.Render("~")
+	scentBGlyph   = scentBStyle.Render("~")
+	scentCGlyph   = scentCStyle.Render("~")
 	entranceGlyph = entranceStyle.Render("S") // 'S' for Start — no longer collides with agent 'E'
 	stenchGlyph   = stenchStyle.Render("~")
 	heatGlyph     = heatStyle.Render(" ")
@@ -108,7 +129,6 @@ type WorldBuilder func(seed int64) *world.World
 // cmd/main.go can construct it.
 type Model struct {
 	World    *world.World
-	Logger   *logging.AgentLogger
 	ShowPath bool
 	build    WorldBuilder
 }
@@ -136,25 +156,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "r":
-			prev := m.World.Agents
-			m.World = m.build(time.Now().UnixNano())
-			for i, oldA := range prev {
-				if i >= len(m.World.Agents) {
-					break
-				}
-				newA := m.World.Agents[i]
-				if oldA.Beliefs != nil {
-					newA.Beliefs = oldA.Beliefs
-				}
-				if oldA.QL != nil {
-					newA.QL = oldA.QL
-					newA.QL.HasPending = false
-				}
-				if oldA.DQN != nil {
-					newA.DQN = oldA.DQN
-					newA.DQN.HasPending = false
-				}
-			}
+			m.reseedPreservingLearning()
 		case "s":
 			m.ShowPath = !m.ShowPath
 		case "w":
@@ -169,19 +171,78 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.World.SetWaterPitsDisabled(next)
 		case "t":
 			m.World.TTLDisabled = !m.World.TTLDisabled
-		case "1", "2", "3", "4", "5", "6", "7":
+		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 			// Toggle the matching agent on/off. The agent at label
 			// equal to the typed digit is the target.
 			if a := m.World.AgentByLabel(rune(msg.String()[0])); a != nil {
 				a.Disabled = !a.Disabled
 			}
+		case "a", "A", "b", "B", "c", "C":
+			// Far-sight agents labeled 'A', 'B', 'C' — accept either
+			// the lowercase or uppercase form of the key.
+			label := rune(msg.String()[0])
+			if label >= 'a' && label <= 'z' {
+				label = label - 'a' + 'A'
+			}
+			if a := m.World.AgentByLabel(label); a != nil {
+				a.Disabled = !a.Disabled
+			}
 		}
 	case tickMsg:
 		m.World.Step()
-		m.Logger.LogTick(m.World)
+		// Auto-reseed when the maze is "solved": write a stats log
+		// snapshot of the just-finished run, then build a fresh
+		// world preserving each agent's learning state. New mazes
+		// start with all agents enabled (NewWorldWithConfig default).
+		if m.World.MazeSolved() {
+			_, _ = m.World.WriteStatsLog(StatsDir)
+			m.reseedPreservingLearning()
+		}
 		return m, tickEvery(tickInterval)
 	}
 	return m, nil
+}
+
+// StatsDir is the directory under which maze-solved JSON snapshots
+// land. Default lives next to the build artifacts so `make clean`
+// also wipes them.
+const StatsDir = "build/stats"
+
+// reseedPreservingLearning constructs a fresh world via m.build and
+// grafts each agent's persistent learning state (Beliefs / QL / DQN
+// / TrustScores) from the prior world onto the new agents.
+//
+// Trust scores survive reseed (so an agent's lifetime opinion of
+// each leader/peer persists), but the run counter (Stats.Starts)
+// does NOT — the new map starts every follower back in stage 1
+// (uniform random pick) for its first ScentRunsForTrustWeighting
+// runs. Trust updates fire per-journey from KillAgent / CheckGoal,
+// not here.
+//
+// Used by the 'r' key AND the auto-reseed-on-solve path.
+func (m *Model) reseedPreservingLearning() {
+	prev := m.World.Agents
+	m.World = m.build(time.Now().UnixNano())
+	for i, oldA := range prev {
+		if i >= len(m.World.Agents) {
+			break
+		}
+		newA := m.World.Agents[i]
+		if oldA.Beliefs != nil {
+			newA.Beliefs = oldA.Beliefs
+		}
+		if oldA.DQN != nil {
+			newA.DQN = oldA.DQN
+			newA.DQN.HasPending = false
+		}
+		if oldA.TrustScores != nil {
+			newA.TrustScores = oldA.TrustScores
+		}
+		// Carry the prior map's LearnedTTL forward as a starting
+		// belief for the new map. The invalidation rule in
+		// MoveAgents drops it if the new map's TTL is larger.
+		newA.LearnedTTL = oldA.LearnedTTL
+	}
 }
 
 // View renders the model: title + grid + per-agent status + footer.
@@ -199,6 +260,7 @@ func (m Model) View() string {
 	b.WriteString("  ")
 	b.WriteString(statStyle.Render(fmt.Sprintf("Seed: %d", m.World.Seed)))
 	b.WriteString("\n")
+	matrixLines := renderTrustMatrixLines(m.World)
 	for y := 0; y < world.BoardHeight; y++ {
 		for x := 0; x < world.BoardWidth; x++ {
 			g := m.glyphAt(m.World, x, y)
@@ -206,6 +268,12 @@ func (m Model) View() string {
 				g = "\x1b[43m" + g + "\x1b[49m"
 			}
 			b.WriteString(g)
+		}
+		// Splice the trust matrix to the right of the first
+		// len(matrixLines) maze rows. Falls off after that.
+		if y < len(matrixLines) {
+			b.WriteString("  ")
+			b.WriteString(matrixLines[y])
 		}
 		b.WriteString("\n")
 	}
@@ -230,8 +298,10 @@ func (m Model) View() string {
 		ttlState = "OFF"
 	}
 	b.WriteString(statStyle.Render(
-		fmt.Sprintf("Cycle %5d | TTL %d | Paths: %s | W killed: %d | wumpus:%s pits:%s ttl:%s\n[q]uit [r]eseed [s]how-path [w]umpus [f]ire/water [t]tl [1..7] agent",
-			m.World.Cycle, world.TTLMultiplier*m.World.Stats.OptimalDistance, pathsStr, m.World.Stats.WumpusDied,
+		fmt.Sprintf("Cycle %5d | TTL %d ×%d | Paths: %s | W killed: %d | wumpus:%s pits:%s ttl:%s\n[q]uit [r]eseed [s]how-path [w]umpus [f]ire/water [t]tl [1..9 a..c] agent",
+			m.World.Cycle,
+			world.TTLMultiplier*m.World.Stats.OptimalDistance, world.TTLMultiplier,
+			pathsStr, m.World.Stats.WumpusDied,
 			wumpState, pitState, ttlState),
 	))
 	return b.String()
@@ -285,10 +355,6 @@ func (m Model) formatAgentStats(a *world.Agent) string {
 	if !a.Alive {
 		alive = "dead    "
 	}
-	reason := a.Stats.LastDeathReason
-	if reason == "" {
-		reason = "-"
-	}
 	distText := fmt.Sprintf("dist:%04d", a.Stats.ActualDistance)
 	switch distSeverity(a.Stats.ActualDistance, world.TTLMultiplier*m.World.Stats.OptimalDistance) {
 	case 2:
@@ -308,15 +374,27 @@ func (m Model) formatAgentStats(a *world.Agent) string {
 	case 3:
 		lastText = solveRed.Render(lastText)
 	}
+	following := "-"
+	if a.CurrentTrustee != 0 {
+		following = string(a.CurrentTrustee)
+	}
+	strLetter := "-"
+	if a.CurrentStrategy != 0 {
+		strLetter = string(a.CurrentStrategy)
+	}
+	learnedTTL := "----"
+	if a.LearnedTTL > 0 {
+		learnedTTL = fmt.Sprintf("%04d", a.LearnedTTL)
+	}
 	return fmt.Sprintf(
-		" %c %s d:%03d k:%03d g:%03d %s best:%04d/%04d t[min/avg/max/last]:%04d/%07.1f/%04d/%s score:%6.2f last_death:%-10s",
-		a.Label, alive,
+		" %c %s str:%s s:%03d f:%s ttl:%s d:%03d k:%03d g:%03d %s best:%04d/%04d t[min/avg/max/last]:%04d/%07.1f/%04d/%s score:%.5f",
+		a.Label, alive, strLetter,
+		a.Stats.Starts, following, learnedTTL,
 		a.Stats.Deaths, a.Stats.WumpusKilled, a.Stats.GoalsReached,
 		distText,
 		a.Stats.BestSolveDistance, a.Stats.BestSolveTime,
 		a.Stats.MinSolveTime, a.Stats.AvgSolveTime, a.Stats.MaxSolveTime, lastText,
-		a.Stats.Score(m.World.Stats.OptimalDistance),
-		reason,
+		a.Stats.Score(m.World.Cycle),
 	)
 }
 
@@ -358,6 +436,16 @@ func (m Model) glyphAt(w *world.World, x, y int) string {
 			return agent6Glyph
 		case '7':
 			return agent7Glyph
+		case '8':
+			return agent8Glyph
+		case '9':
+			return agent9Glyph
+		case 'A':
+			return agentAGlyph
+		case 'B':
+			return agentBGlyph
+		case 'C':
+			return agentCGlyph
 		}
 	}
 	if !w.WumpusDisabled {
@@ -414,6 +502,16 @@ func (m Model) glyphAt(w *world.World, x, y int) string {
 			return scent6Glyph
 		case '7':
 			return scent7Glyph
+		case '8':
+			return scent8Glyph
+		case '9':
+			return scent9Glyph
+		case 'A':
+			return scentAGlyph
+		case 'B':
+			return scentBGlyph
+		case 'C':
+			return scentCGlyph
 		}
 		return pathGlyph
 	default:

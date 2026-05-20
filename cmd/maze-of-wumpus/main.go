@@ -27,24 +27,23 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"maze-of-wumpus/src/logging"
 	"maze-of-wumpus/src/strategy"
 	"maze-of-wumpus/src/tui"
 	"maze-of-wumpus/src/world"
 	"maze-of-wumpus/src/wumpus"
 )
 
-// LogDir: relative path where per-agent NDJSON logs are written.
-const LogDir = "build/logs"
-
 // buildWorld constructs a world with the full strategy configuration
 // for both agents and wumpus. Used at launch and by the TUI's reseed.
 func buildWorld(seed int64) *world.World {
 	return world.NewWorldWithConfig(world.Config{
-		Seed:              seed,
-		StrategyFor:       strategy.ForLabel,
-		WumpusStrategy:    wumpus.PickStrategy,
-		VengeanceStrategy: wumpus.ScentStrategy,
+		Seed:                         seed,
+		StrategyFor:                  strategy.ForLabel,
+		StrategyForLetter:            strategy.ForLetter,
+		StrategyLetters:              strategy.StrategyLetters,
+		StrategyDescriptionForLetter: strategy.DescriptionByLetter,
+		WumpusStrategy:               wumpus.PickStrategy,
+		VengeanceStrategy:            wumpus.ScentStrategy,
 	})
 }
 
@@ -59,11 +58,8 @@ var teaRunner = func(m tui.Model) error {
 // runProgram is the indirection that hides the bubbletea call from
 // tests. Tests swap in a stub.
 var runProgram = func(seed int64) error {
-	logger := logging.NewAgentLogger(LogDir)
-	logger.SetStrategyNamer(strategy.Name)
-	defer logger.Close()
+	ensureLogDirs()
 	m := tui.NewModel(seed, buildWorld)
-	m.Logger = logger
 	// On macOS, kick off a non-blocking 'say' announcement that
 	// overlaps with the first TUI render. No-op on every other OS.
 	announce()
@@ -97,28 +93,69 @@ func runApp(args []string, stdout, stderr io.Writer) int {
 }
 
 // runHeadless drives the simulation without UI: one line per tick on
-// stdout AND one JSON record per cycle per agent.
+// stdout.
 func runHeadless(seed int64, steps int, stdout io.Writer) {
-	logger := logging.NewAgentLogger(LogDir)
-	logger.SetStrategyNamer(strategy.Name)
-	defer logger.Close()
-	runHeadlessLoop(buildWorld(seed), steps, stdout, logger)
+	ensureLogDirs()
+	runHeadlessLoop(buildWorld(seed), steps, stdout)
+}
+
+// ensureLogDirs creates the directories World.WriteStatsLog and
+// World.appendSolveRecord write to. Production callers (TUI and
+// headless) invoke it once at startup; test runs skip it so they
+// don't litter the package working directory with stray logs.
+func ensureLogDirs() {
+	_ = os.MkdirAll(tui.StatsDir, 0755)
+	_ = os.MkdirAll(world.SolveLogDir, 0755)
 }
 
 // runHeadlessLoop is the inner loop, split out so tests can poke at
-// the early-exit-on-goal branch with a synthetic World. `logger` may
-// be nil (the LogTick call is nil-safe).
-func runHeadlessLoop(w *world.World, steps int, stdout io.Writer, logger *logging.AgentLogger) {
+// the early-exit-on-goal branch with a synthetic World. When the
+// maze is solved mid-loop, the loop snapshots stats and auto-
+// reseeds preserving each agent's learning state — same behavior
+// as the TUI's tick handler.
+func runHeadlessLoop(w *world.World, steps int, stdout io.Writer) {
 	writeHeadlessState(stdout, w)
-	logger.LogTick(w)
 	for i := 0; i < steps; i++ {
 		w.Step()
 		writeHeadlessState(stdout, w)
-		logger.LogTick(w)
 		if w.GameOver {
 			return
 		}
+		if w.MazeSolved() {
+			_, _ = w.WriteStatsLog(tui.StatsDir)
+			w = reseedHeadless(w)
+			writeHeadlessState(stdout, w)
+		}
 	}
+}
+
+// reseedHeadless builds a fresh world for headless mode preserving
+// each agent's Beliefs / QL / DQN / TrustScores. Mirrors the TUI
+// Model helper — trust updates fire per-journey from KillAgent /
+// CheckGoal, not at reseed.
+func reseedHeadless(prevWorld *world.World) *world.World {
+	prev := prevWorld.Agents
+	w := buildWorld(time.Now().UnixNano())
+	for i, oldA := range prev {
+		if i >= len(w.Agents) {
+			break
+		}
+		newA := w.Agents[i]
+		if oldA.Beliefs != nil {
+			newA.Beliefs = oldA.Beliefs
+		}
+		if oldA.DQN != nil {
+			newA.DQN = oldA.DQN
+			newA.DQN.HasPending = false
+		}
+		if oldA.TrustScores != nil {
+			newA.TrustScores = oldA.TrustScores
+		}
+		// Carry the prior map's LearnedTTL forward as a prior
+		// belief — invalidation in MoveAgents drops it if stale.
+		newA.LearnedTTL = oldA.LearnedTTL
+	}
+	return w
 }
 
 // writeHeadlessState emits one space-separated key=value record per
@@ -141,7 +178,7 @@ func writeHeadlessState(out io.Writer, w *world.World) {
 			a.Label, a.Stats.WumpusKilled,
 			a.Label, a.Stats.GoalsReached,
 			a.Label, a.Stats.ActualDistance,
-			a.Label, a.Stats.Score(w.Stats.OptimalDistance),
+			a.Label, a.Stats.Score(w.Cycle),
 		)
 	}
 	fmt.Fprintf(out, " game_over=%v\n", w.GameOver)

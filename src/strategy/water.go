@@ -17,6 +17,8 @@ import (
 // NeedsWater reports whether the agent should currently treat water
 // as its primary objective: it has no charges, the world still has
 // at least one water pit on the map, AND water pits are enabled.
+// This is the **omniscient** variant used by agents 2 / 3 which have
+// global map access.
 func NeedsWater(w *world.World, a *world.Agent) bool {
 	if w.WaterPitsDisabled {
 		return false
@@ -24,8 +26,47 @@ func NeedsWater(w *world.World, a *world.Agent) bool {
 	return a.Water == 0 && len(w.Maze.WaterPits) > 0
 }
 
+// NeedsKnownWater is the partial-observability variant of NeedsWater
+// for agents 1 / 4 / 5 / 6 / 7. The agent only treats water as a
+// goal when it has actually perceived at least one water-pit cell.
+// Falls back to false otherwise even if the world has water pits.
+func NeedsKnownWater(w *world.World, a *world.Agent) bool {
+	if w.WaterPitsDisabled || a.Water != 0 {
+		return false
+	}
+	for _, p := range w.Maze.WaterPits {
+		if a.KnownCells[p] {
+			return true
+		}
+	}
+	return false
+}
+
+// NearestKnownWaterPit returns the closest water pit (by Manhattan
+// distance) that the agent has actually perceived (i.e., it's in
+// `a.KnownCells`). Returns (Pos{}, false) when the agent hasn't seen
+// any water pit yet.
+func NearestKnownWaterPit(w *world.World, a *world.Agent, from world.Pos) (world.Pos, bool) {
+	best := world.Pos{}
+	bestD := 1 << 30
+	found := false
+	for _, p := range w.Maze.WaterPits {
+		if !a.KnownCells[p] {
+			continue
+		}
+		d := world.AbsInt(p.X-from.X) + world.AbsInt(p.Y-from.Y)
+		if d < bestD {
+			bestD = d
+			best = p
+			found = true
+		}
+	}
+	return best, found
+}
+
 // NearestWaterPit returns the water pit closest to `from` by Manhattan
 // distance. Returns (Pos{}, false) when no water pits remain.
+// Omniscient: used by agents 2 / 3 only.
 func NearestWaterPit(w *world.World, from world.Pos) (world.Pos, bool) {
 	if len(w.Maze.WaterPits) == 0 {
 		return world.Pos{}, false
@@ -54,63 +95,61 @@ func TargetFor(w *world.World, a *world.Agent) world.Pos {
 	return w.Maze.GoalPos
 }
 
-// BFSToward returns a hazard-avoiding BFS path from `from` to `to`,
-// same semantics as BFSToGoal but with an arbitrary destination.
-// Used by D (Q-learning) and E (DQN) to compute a one-step override
-// toward water when the agent needs a charge.
+// bfsTowardKnown is the partial-observability variant of BFSToward:
+// only traverses cells in `a.KnownCells`. Used by PO agents for the
+// water override. Now uses Dijkstra under the hood so the path
+// respects 8-conn weighting and corner-clipping; the function name
+// is kept for callers.
+func bfsTowardKnown(w *world.World, a *world.Agent, from, to world.Pos) []world.Pos {
+	if from == to {
+		return nil
+	}
+	return w.DijkstraPath(from, to, func(p world.Pos) bool {
+		if !knownWalkable(w, a, p) {
+			return false
+		}
+		if p != to && w.IsHazard(p) {
+			return false
+		}
+		return true
+	})
+}
+
+// BFSToward returns a hazard-avoiding shortest path from `from` to
+// `to` over the full (omniscient) walkable graph. Used by R (BFS)
+// for goal/water routing. Backed by Dijkstra with 8-conn weighting
+// and corner-clipping; "BFS" is kept in the name for historical
+// continuity.
 func BFSToward(w *world.World, from, to world.Pos) []world.Pos {
 	if from == to {
 		return nil
 	}
-	type node struct {
-		world.Pos
-		parent int
-	}
-	nodes := []node{{from, -1}}
-	visited := map[world.Pos]int{from: 0}
-	for head := 0; head < len(nodes); head++ {
-		cur := nodes[head]
-		if cur.Pos == to {
-			var path []world.Pos
-			for i := head; i != -1; i = nodes[i].parent {
-				path = append([]world.Pos{nodes[i].Pos}, path...)
-			}
-			if len(path) > 0 && path[0] == from {
-				path = path[1:]
-			}
-			return path
+	return w.DijkstraPath(from, to, func(p world.Pos) bool {
+		if !w.Maze.IsWalkable(p) {
+			return false
 		}
-		for _, d := range world.Cardinals {
-			np := world.Pos{X: cur.X + d.X, Y: cur.Y + d.Y}
-			if !w.Maze.IsWalkable(np) {
-				continue
-			}
-			if _, seen := visited[np]; seen {
-				continue
-			}
-			if np != to && w.IsHazard(np) {
-				continue
-			}
-			visited[np] = len(nodes)
-			nodes = append(nodes, node{np, head})
+		if p != to && w.IsHazard(p) {
+			return false
 		}
-	}
-	return nil
+		return true
+	})
 }
 
 // WaterOverride returns the first step of a BFS path toward the
-// nearest water pit, or (Pos{}, false) when not applicable. Used by
-// D and E to bypass their RL policy when fetching water is the
-// strictly safer move.
+// nearest KNOWN water pit, or (Pos{}, false) when not applicable.
+// Partial-observability-respecting: only considers water pits the
+// agent has seen, and only routes through cells in a.KnownCells.
+// Used by agents 4 and 5 to bypass their RL policy when fetching
+// a known water charge is the strictly safer move.
 func WaterOverride(w *world.World, a *world.Agent) (world.Pos, bool) {
-	if !NeedsWater(w, a) {
+	if !NeedsKnownWater(w, a) {
 		return world.Pos{}, false
 	}
-	pit, ok := NearestWaterPit(w, a.Pos)
+	pit, ok := NearestKnownWaterPit(w, a, a.Pos)
 	if !ok {
 		return world.Pos{}, false
 	}
-	path := BFSToward(w, a.Pos, pit)
+	path := bfsTowardKnown(w, a, a.Pos, pit)
 	if len(path) == 0 {
 		return world.Pos{}, false
 	}

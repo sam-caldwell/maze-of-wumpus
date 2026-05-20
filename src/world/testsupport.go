@@ -31,6 +31,7 @@ func SpawnAgentForTest(w *World, label rune) *Agent {
 	a.RespawnIn = -1
 	a.Stats.ActualDistance = 0
 	w.AgentAt[entrance.Y][entrance.X] = a
+	w.MarkAgentSensed(a)
 	return a
 }
 

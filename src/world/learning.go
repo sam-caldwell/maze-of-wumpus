@@ -10,8 +10,9 @@ import (
 	"math/rand"
 )
 
-// QActionCount: one Q-value per cardinal direction.
-const QActionCount = 4
+// QActionCount: one Q-value per Moore-direction action (8: N, S,
+// W, E + 4 diagonals).
+const QActionCount = 8
 
 // QLearning is the persistent Q-table + per-step transition snapshot
 // used by the tabular Q-learning agent and wumpus.
@@ -63,6 +64,15 @@ func (q *QLearning) ArgMaxQ(s Pos) int {
 	return best
 }
 
+// HasState reports whether s has any recorded Q-value row. Used by
+// the scent-biased argmax to decide whether to fall back to a
+// uniform random action (no Q history AND no scent perception) vs
+// pick the highest Q+scent score.
+func (q *QLearning) HasState(s Pos) bool {
+	_, ok := q.Q[s]
+	return ok
+}
+
 // SetQ writes one cell of the Q table.
 func (q *QLearning) SetQ(s Pos, action int, v float64) {
 	row := q.Q[s]
@@ -76,10 +86,18 @@ func (q *QLearning) GetQ(s Pos, action int) float64 {
 }
 
 // DQN sizes.
+//
+// DqnInput = 6 local-topology features + 8 Moore-neighbor scent
+// features (see AgentDqnFeatures slot map). The scent slots let
+// the DQN PERCEIVE trusted-scent gradient at decision time rather
+// than only learning about it through PendingBonus reward shaping.
+//
+// DqnOutput = 8 — one Q-value per Moore direction so the network
+// can pick diagonals as well as cardinals.
 const (
-	DqnInput  = 6
+	DqnInput  = 14
 	DqnHidden = 16
-	DqnOutput = 4
+	DqnOutput = 8
 )
 
 // DQN holds the model parameters plus the per-step Bellman-update
@@ -172,19 +190,26 @@ func (d *DQN) Update(in []float64, action int, target float64, learnRate float64
 	}
 }
 
-// AgentDqnFeatures: 6-dimensional input vector for agent 5's DQN.
-// Goal-relative features (formerly slots 2 and 3) have been removed
-// to keep this a partially-observable environment — the network
-// must discover that the goal exists from terminal rewards alone.
-// The two now-unused slots are replaced by local walkability flags
-// so the agent has cheap local-topology hints.
+// AgentDqnFeatures: 14-dimensional input vector for the DQN agent.
+// Strict-PO friendly: no goal-relative slot. Slots 6..13 are scent
+// signed-freshness at each Moore neighbor (positive when the
+// neighbor carries the agent's trustee scent; negative when it
+// carries a label with negative TrustScores — dynamic repel).
 //
-//	0  normalized X position
-//	1  normalized Y position
-//	2  east neighbor walkable (0/1)
-//	3  south neighbor walkable (0/1)
-//	4  heat at current cell
-//	5  stench at current cell
+//	0   normalized X position
+//	1   normalized Y position
+//	2   east neighbor walkable (0/1)
+//	3   south neighbor walkable (0/1)
+//	4   heat at current cell
+//	5   stench at current cell
+//	6   scent signed freshness at Cardinals[0] (N)
+//	7   scent signed freshness at Cardinals[1] (S)
+//	8   scent signed freshness at Cardinals[2] (W)
+//	9   scent signed freshness at Cardinals[3] (E)
+//	10  scent signed freshness at Cardinals[4] (NW)
+//	11  scent signed freshness at Cardinals[5] (NE)
+//	12  scent signed freshness at Cardinals[6] (SW)
+//	13  scent signed freshness at Cardinals[7] (SE)
 func AgentDqnFeatures(w *World, a *Agent) []float64 {
 	in := make([]float64, DqnInput)
 	in[0] = float64(a.Pos.X) / float64(BoardWidth)
@@ -200,6 +225,9 @@ func AgentDqnFeatures(w *World, a *Agent) []float64 {
 	}
 	if w.StenchAt(a.Pos.X, a.Pos.Y) {
 		in[5] = 1
+	}
+	for i, d := range Cardinals {
+		in[6+i] = w.ScentSignedFreshness(a, a.Pos.X+d.X, a.Pos.Y+d.Y)
 	}
 	return in
 }

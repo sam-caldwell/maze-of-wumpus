@@ -6,12 +6,15 @@ import (
 	"maze-of-wumpus/src/world"
 )
 
-// TestPOMDPStrategy_PrefersClosestSafeNeighbor: with all neighbors
-// equally safe, agent 6 picks the one closest to the goal.
-func TestPOMDPStrategy_PrefersClosestSafeNeighbor(t *testing.T) {
+// TestScentFollower_PrefersFreshLeaderTrail: agent 6 walks toward
+// the neighbor with the strongest leader-scent freshness signal.
+// Forces CurrentTrustee = '2' since the test plants agent 2's scent
+// at south — without this the per-map trustee picked by NewWorld
+// could be '5' (agent 6's other attract candidate).
+func TestScentFollower_PrefersFreshLeaderTrail(t *testing.T) {
 	w := newConfiguredWorld(500)
-	a := world.SpawnAgentForTest(w, '6')
-	// Park the agent at an interior cell with known neighbors.
+	a := world.SpawnAgentForTest(w, '4')
+	a.CurrentTrustee = '2'
 	w.AgentAt[a.Pos.Y][a.Pos.X] = nil
 	a.Pos = world.Pos{X: 40, Y: 40}
 	w.AgentAt[40][40] = a
@@ -19,36 +22,80 @@ func TestPOMDPStrategy_PrefersClosestSafeNeighbor(t *testing.T) {
 	for _, d := range world.Cardinals {
 		w.Maze.Cells[40+d.Y][40+d.X] = world.CellPath
 	}
-	// Pick whichever neighbor has the lowest (best) BFS distance to
-	// goal — agent 6 computes the same distance via its own BFS.
-	bestDist := 1 << 30
-	var want world.Pos
-	for _, d := range world.Cardinals {
-		np := world.Pos{X: a.Pos.X + d.X, Y: a.Pos.Y + d.Y}
-		if !w.Maze.IsWalkable(np) {
-			continue
-		}
-		dist := bfsDistToGoal(w, np)
-		if dist >= 0 && dist < bestDist {
-			bestDist = dist
-			want = np
-		}
-	}
-	if bestDist == 1<<30 {
-		t.Skip("no walkable neighbor reaches goal at this seed")
-	}
-	got := POMDPStrategy(w, a)
-	if got != want {
-		t.Errorf("POMDPStrategy = %v, want %v (best BFS dist %d)",
-			got, want, bestDist)
+	w.MarkAgentSensed(a)
+	// Plant scent: east neighbor is a STALE deposit from agent 1
+	// (long ago); south neighbor is a FRESH deposit from agent 2.
+	// Agent 4 (scent-follower) should pick south.
+	w.Cycle = 200
+	east := world.Pos{X: 41, Y: 40}
+	south := world.Pos{X: 40, Y: 41}
+	w.ScentOwner[east.Y][east.X] = '1'
+	w.ScentCycle[east.Y][east.X] = 50 // age 150 → freshness 0.85
+	w.ScentOwner[south.Y][south.X] = '2'
+	w.ScentCycle[south.Y][south.X] = 195 // age 5 → freshness ~0.995 (fresher)
+	got := ScentFollowerStrategy(w, a)
+	if got != south {
+		t.Errorf("scent-follower picked %v, want south %v (fresher scent)", got, south)
 	}
 }
 
-// TestPOMCPStrategy_PicksAMove: agent 7 returns a valid cardinal
-// neighbor (or a.Pos if boxed in).
-func TestPOMCPStrategy_PicksAMove(t *testing.T) {
+// TestScentFollower_IgnoresNonLeaderScent: scent from other
+// followers (5,6,7) is not "leader" scent (leaders are {1,2,3}),
+// so it should be ignored.
+func TestScentFollower_IgnoresNonLeaderScent(t *testing.T) {
+	w := newConfiguredWorld(501)
+	a := world.SpawnAgentForTest(w, '4')
+	w.AgentAt[a.Pos.Y][a.Pos.X] = nil
+	a.Pos = world.Pos{X: 40, Y: 40}
+	w.AgentAt[40][40] = a
+	w.Maze.Cells[40][40] = world.CellPath
+	for _, d := range world.Cardinals {
+		w.Maze.Cells[40+d.Y][40+d.X] = world.CellPath
+	}
+	w.MarkAgentSensed(a)
+	w.Cycle = 10
+	// Both neighbors have FRESH scent from non-leaders.
+	w.ScentOwner[40][41] = '6'
+	w.ScentCycle[40][41] = 9
+	w.ScentOwner[41][40] = '7'
+	w.ScentCycle[41][40] = 9
+	got := ScentFollowerStrategy(w, a)
+	if got == a.Pos {
+		t.Error("scent-follower froze when only non-leader scent was available")
+	}
+}
+
+// TestScentFollower_ColdStartMovesOutward: at game start with no
+// scent anywhere, scent-follower picks an outward-bias neighbor.
+func TestScentFollower_ColdStartMovesOutward(t *testing.T) {
 	w := newConfiguredWorld(502)
-	a := world.SpawnAgentForTest(w, '7')
+	killAllWumpus(w)
+	a := world.SpawnAgentForTest(w, '4')
+	got := ScentFollowerStrategy(w, a)
+	if got == a.Pos {
+		t.Errorf("scent-follower froze at game start: %v", got)
+	}
+	dx, dy := got.X-a.Pos.X, got.Y-a.Pos.Y
+	if world.AbsInt(dx)+world.AbsInt(dy) != 1 {
+		t.Errorf("returned non-cardinal step %v from %v", got, a.Pos)
+	}
+}
+
+// TestPOMCPStrategy_PicksAMove: POMCP (agent 6) returns a valid
+// cardinal neighbor (or a.Pos if boxed in).
+func TestPOMCPStrategy_PicksAMove(t *testing.T) {
+	w := newConfiguredWorld(503)
+	a := world.SpawnAgentForTest(w, '6')
+	if a.KnownCells == nil {
+		a.KnownCells = map[world.Pos]bool{}
+	}
+	for y := 0; y < world.BoardHeight; y++ {
+		for x := 0; x < world.BoardWidth; x++ {
+			if w.Maze.IsWalkable(world.Pos{X: x, Y: y}) {
+				a.KnownCells[world.Pos{X: x, Y: y}] = true
+			}
+		}
+	}
 	got := POMCPStrategy(w, a)
 	if got == a.Pos {
 		t.Skip("agent boxed in at this seed")
@@ -59,18 +106,36 @@ func TestPOMCPStrategy_PicksAMove(t *testing.T) {
 	}
 }
 
-// TestForLabel_6and7: the new strategy labels are wired.
-func TestForLabel_6and7(t *testing.T) {
-	if ForLabel('6') == nil {
-		t.Error("ForLabel('6') = nil")
+// TestPOMCPStrategy_ColdStartFallbackMoves: at game start, agent 7
+// must still pick a cardinal neighbor via outward-bias rollouts.
+func TestPOMCPStrategy_ColdStartFallbackMoves(t *testing.T) {
+	w := newConfiguredWorld(602)
+	killAllWumpus(w)
+	a := world.SpawnAgentForTest(w, '6')
+	got := POMCPStrategy(w, a)
+	if got == a.Pos {
+		t.Errorf("POMCPStrategy froze at game start: %v", got)
 	}
-	if ForLabel('7') == nil {
-		t.Error("ForLabel('7') = nil")
+	dx, dy := got.X-a.Pos.X, got.Y-a.Pos.Y
+	if world.AbsInt(dx)+world.AbsInt(dy) != 1 {
+		t.Errorf("POMCPStrategy returned non-cardinal step %v from %v", got, a.Pos)
 	}
-	if Name('6') != "pomdp" {
-		t.Errorf("Name('6') = %q, want pomdp", Name('6'))
+}
+
+// TestForLabel_ScentFollowerAndPlanners: scent-follower (4), POMCP
+// (6) and QMDP (7) are wired with current names.
+func TestForLabel_ScentFollowerAndPlanners(t *testing.T) {
+	cases := map[rune]string{
+		'4': "scent-follower",
+		'6': "pomcp",
+		'7': "qmdp",
 	}
-	if Name('7') != "pomcp" {
-		t.Errorf("Name('7') = %q, want pomcp", Name('7'))
+	for label, want := range cases {
+		if ForLabel(label) == nil {
+			t.Errorf("ForLabel(%c) = nil", label)
+		}
+		if got := Name(label); got != want {
+			t.Errorf("Name(%c) = %q, want %q", label, got, want)
+		}
 	}
 }

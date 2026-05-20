@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -52,25 +53,26 @@ func TestUpdate_QuitKeys(t *testing.T) {
 
 func TestUpdate_RestartKey_PreservesLearning(t *testing.T) {
 	m := newTestModel(1)
-	a := m.World.AgentByLabel('1')
-	d := m.World.AgentByLabel('4')
-	e := m.World.AgentByLabel('5')
-	a.Beliefs.SafeFromPit[world.Pos{X: 1, Y: 2}] = true
-	d.QL.SetQ(world.Pos{X: 3, Y: 4}, 0, 7.7)
-	e.DQN.W1[0] = 1234.5
+	bayes := m.World.AgentByLabel('3')    // Bayesian (was '1' pre-renumber)
+	follower := m.World.AgentByLabel('4') // scent-follower
+	dqn := m.World.AgentByLabel('5')      // DQN
+	bayes.Beliefs.SafeFromPit[world.Pos{X: 1, Y: 2}] = true
+	dqn.DQN.W1[0] = 1234.5
+	follower.LearnedTTL = 555
 	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
 	newWorld := m2.(Model).World
 	if newWorld == m.World {
 		t.Fatal("world was not replaced on 'r'")
 	}
-	if !newWorld.AgentByLabel('1').Beliefs.SafeFromPit[world.Pos{X: 1, Y: 2}] {
-		t.Error("A's Beliefs did not carry over")
-	}
-	if newWorld.AgentByLabel('4').QL.GetQ(world.Pos{X: 3, Y: 4}, 0) != 7.7 {
-		t.Error("D's Q-table did not carry over")
+	if !newWorld.AgentByLabel('3').Beliefs.SafeFromPit[world.Pos{X: 1, Y: 2}] {
+		t.Error("Bayesian beliefs did not carry over")
 	}
 	if newWorld.AgentByLabel('5').DQN.W1[0] != 1234.5 {
-		t.Error("E's DQN weights did not carry over")
+		t.Error("DQN weights did not carry over")
+	}
+	if newWorld.AgentByLabel('4').LearnedTTL != 555 {
+		t.Errorf("LearnedTTL did not carry over: %d, want 555",
+			newWorld.AgentByLabel('4').LearnedTTL)
 	}
 }
 
@@ -128,12 +130,11 @@ func TestUpdate_FireToggle(t *testing.T) {
 }
 
 // TestView_TogglesReflectedInStatus: the status footer should show
-// wumpus, pits, and ttl states.
+// wumpus, pits, and ttl states. Defaults: wumpus/pits OFF, ttl ON.
 func TestView_TogglesReflectedInStatus(t *testing.T) {
 	m := newTestModel(1)
-	// Defaults: everything disabled.
 	v := m.View()
-	for _, want := range []string{"wumpus:OFF", "pits:OFF", "ttl:OFF"} {
+	for _, want := range []string{"wumpus:OFF", "pits:OFF", "ttl:on"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("status missing %q at startup defaults", want)
 		}
@@ -147,45 +148,52 @@ func TestView_TogglesReflectedInStatus(t *testing.T) {
 	}
 }
 
-// TestUpdate_AgentToggles: '1'..'5' flips each agent's Disabled flag.
-// Agent 1 is enabled by default; agents 2..5 are disabled by default.
+// TestView_StatusShowsTTLMultiplier: the status footer renders the
+// TTLMultiplier value alongside the absolute TTL budget so the user
+// can see the scaling factor at a glance.
+func TestView_StatusShowsTTLMultiplier(t *testing.T) {
+	m := newTestModel(1)
+	v := m.View()
+	want := fmt.Sprintf("×%d", world.TTLMultiplier)
+	if !strings.Contains(v, want) {
+		t.Errorf("status missing TTL multiplier %q: %q", want, v)
+	}
+}
+
+// TestUpdate_AgentToggles: '1'..'7' flips each agent's Disabled flag.
+// All seven agents start enabled by default.
 func TestUpdate_AgentToggles(t *testing.T) {
 	m := newTestModel(1)
-	defaults := map[string]bool{
-		"1": false, // agent 1 starts enabled
-		"2": true, "3": true, "4": true, "5": true,
-	}
-	for _, key := range []string{"1", "2", "3", "4", "5"} {
+	for _, key := range []string{"1", "2", "3", "4", "5", "6", "7"} {
 		a := m.World.AgentByLabel(rune(key[0]))
-		if a.Disabled != defaults[key] {
-			t.Fatalf("agent %s default Disabled = %v, want %v",
-				key, a.Disabled, defaults[key])
-		}
-		startDisabled := a.Disabled
-		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
-		if a.Disabled == startDisabled {
-			t.Errorf("first %s did not flip agent %s", key, key)
+		if a.Disabled {
+			t.Fatalf("agent %s should default to enabled (Disabled=false)", key)
 		}
 		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
-		if a.Disabled != startDisabled {
-			t.Errorf("second %s did not return agent %s to default", key, key)
+		if !a.Disabled {
+			t.Errorf("first %s did not disable agent %s", key, key)
+		}
+		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
+		if a.Disabled {
+			t.Errorf("second %s did not re-enable agent %s", key, key)
 		}
 	}
 }
 
-// TestUpdate_TTLToggle: 't' flips TTLDisabled.
+// TestUpdate_TTLToggle: 't' flips TTLDisabled. TTL defaults to ON
+// (TTLDisabled=false) so the first press disables it.
 func TestUpdate_TTLToggle(t *testing.T) {
 	m := newTestModel(1)
-	if !m.World.TTLDisabled {
-		t.Fatal("TTLDisabled should default to true")
+	if m.World.TTLDisabled {
+		t.Fatal("TTLDisabled should default to false (TTL on)")
 	}
 	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
-	if m2.(Model).World.TTLDisabled {
-		t.Error("'t' did not enable TTL")
+	if !m2.(Model).World.TTLDisabled {
+		t.Error("'t' did not disable TTL")
 	}
 	m3, _ := m2.(Model).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
-	if !m3.(Model).World.TTLDisabled {
-		t.Error("second 't' did not flip TTLDisabled back on")
+	if m3.(Model).World.TTLDisabled {
+		t.Error("second 't' did not re-enable TTL")
 	}
 }
 
@@ -252,6 +260,45 @@ func TestView_NonEmpty(t *testing.T) {
 	}
 	if !strings.Contains(s, "1 alive") && !strings.Contains(s, "1 dead") {
 		t.Error("expected agent 1 status row in view")
+	}
+}
+
+// TestFormatAgentStats_HasStartsColumn confirms the new s:NNN
+// column shows up and the old last_death column is gone.
+func TestFormatAgentStats_HasStartsColumn(t *testing.T) {
+	m := newTestModel(1)
+	a := m.World.AgentByLabel('1')
+	a.Alive = true
+	a.Stats.Starts = 7
+	a.Stats.LastDeathReason = "wumpus" // still tracked but not rendered
+	out := m.formatAgentStats(a)
+	if !strings.Contains(out, "s:007") {
+		t.Errorf("status row missing 's:007': %q", out)
+	}
+	if strings.Contains(out, "last_death") {
+		t.Errorf("status row still has last_death column: %q", out)
+	}
+}
+
+// TestFormatAgentStats_HasFollowingColumn: the new f:<trustee>
+// column renders the agent's CurrentTrustee for followers (4-7)
+// and a dash for leaders (1-3) or any agent that hasn't picked yet.
+func TestFormatAgentStats_HasFollowingColumn(t *testing.T) {
+	m := newTestModel(1)
+	follower := m.World.AgentByLabel('4')
+	follower.Alive = true
+	follower.CurrentTrustee = '2'
+	out := m.formatAgentStats(follower)
+	if !strings.Contains(out, "f:2") {
+		t.Errorf("follower row missing 'f:2': %q", out)
+	}
+
+	leader := m.World.AgentByLabel('1')
+	leader.Alive = true
+	leader.CurrentTrustee = 0
+	out = m.formatAgentStats(leader)
+	if !strings.Contains(out, "f:-") {
+		t.Errorf("leader row missing 'f:-': %q", out)
 	}
 }
 
@@ -411,6 +458,16 @@ func TestGlyphAt_AllCellTypes(t *testing.T) {
 	if m.glyphAt(w, 5, 5) != scent5Glyph {
 		t.Error("scent E glyph mismatch")
 	}
+	farSightScents := map[rune]string{
+		'8': scent8Glyph, '9': scent9Glyph, 'A': scentAGlyph,
+		'B': scentBGlyph, 'C': scentCGlyph,
+	}
+	for label, want := range farSightScents {
+		w.ScentOwner[5][5] = label
+		if got := m.glyphAt(w, 5, 5); got != want {
+			t.Errorf("scent %c glyph mismatch: %q", label, got)
+		}
+	}
 	w.ScentOwner[5][5] = 'Z'
 	if m.glyphAt(w, 5, 5) != pathGlyph {
 		t.Error("unknown scent owner should render as path")
@@ -439,6 +496,16 @@ func TestGlyphAt_AllCellTypes(t *testing.T) {
 	a.Label = '5'
 	if m.glyphAt(w, 5, 5) != agent5Glyph {
 		t.Error("agent E glyph mismatch")
+	}
+	farSightAgents := map[rune]string{
+		'8': agent8Glyph, '9': agent9Glyph, 'A': agentAGlyph,
+		'B': agentBGlyph, 'C': agentCGlyph,
+	}
+	for label, want := range farSightAgents {
+		a.Label = label
+		if got := m.glyphAt(w, 5, 5); got != want {
+			t.Errorf("agent %c glyph mismatch: %q", label, got)
+		}
 	}
 }
 

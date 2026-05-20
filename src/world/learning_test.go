@@ -32,7 +32,10 @@ func TestQLearning_GetSetMaxArgMax(t *testing.T) {
 func TestDQN_ForwardAndUpdate(t *testing.T) {
 	rng := rand.New(rand.NewSource(7))
 	d := NewDQN(rng)
-	in := []float64{0.1, 0.2, 0.3, 0.4, 0, 1}
+	in := make([]float64, DqnInput)
+	for i := range in {
+		in[i] = float64(i+1) / float64(DqnInput+1)
+	}
 	_, out := d.Forward(in)
 	if len(out) != DqnOutput {
 		t.Fatalf("output dim = %d, want %d", len(out), DqnOutput)
@@ -57,7 +60,7 @@ func TestDQN_ForwardAndUpdate(t *testing.T) {
 func TestDQN_UpdateZeroDeltaIsNoop(t *testing.T) {
 	rng := rand.New(rand.NewSource(8))
 	d := NewDQN(rng)
-	in := []float64{0, 0, 0, 0, 0, 0}
+	in := make([]float64, DqnInput)
 	_, out := d.Forward(in)
 	before := make([]float64, len(d.W1))
 	copy(before, d.W1)
@@ -91,5 +94,60 @@ func TestAgentDqnFeatures_Shape(t *testing.T) {
 	}
 	if f[4] != 1 || f[5] != 1 {
 		t.Errorf("heat/stench = %v %v, want 1/1", f[4], f[5])
+	}
+}
+
+// TestAgentDqnFeatures_ScentSlots: the 4 trailing slots reflect
+// signed scent freshness at the agent's cardinal neighbors, with
+// the trustee scent producing a positive value and a negative-trust
+// label producing a negative value.
+func TestAgentDqnFeatures_ScentSlots(t *testing.T) {
+	w := NewWorld(910)
+	a := SpawnAgentForTest(w, '5')
+	a.Pos = Pos{X: 40, Y: 40}
+	a.CurrentTrustee = '2'
+	a.TrustScores = map[rune]float64{'3': -1}
+	w.Cycle = 50
+	// Plant trustee scent EAST (Cardinals[3]) and negative-trust
+	// scent WEST (Cardinals[2]). Make sure the OTHER scent cells
+	// the test world might already have around (40,40) don't
+	// pollute the assertion by zeroing N/S explicitly.
+	north := Pos{X: 40, Y: 39}
+	south := Pos{X: 40, Y: 41}
+	east := Pos{X: 41, Y: 40}
+	west := Pos{X: 39, Y: 40}
+	w.ScentCycle[north.Y][north.X] = 0
+	w.ScentCycle[south.Y][south.X] = 0
+	w.ScentOwner[east.Y][east.X] = '2'
+	w.ScentCycle[east.Y][east.X] = 50 // freshness = 1.0
+	w.ScentOwner[west.Y][west.X] = '3'
+	w.ScentCycle[west.Y][west.X] = 50
+	f := AgentDqnFeatures(w, a)
+	// Cardinals = {N, S, W, E} → slots 6..9 correspond to those.
+	if f[6] != 0 {
+		t.Errorf("north slot = %v, want 0", f[6])
+	}
+	if f[7] != 0 {
+		t.Errorf("south slot = %v, want 0", f[7])
+	}
+	if f[8] != -1.0 {
+		t.Errorf("west slot = %v, want -1.0 (negative trust)", f[8])
+	}
+	if f[9] != 1.0 {
+		t.Errorf("east slot = %v, want +1.0 (trustee)", f[9])
+	}
+}
+
+// TestHasState_Distinguishes: HasState returns false for an unseen
+// position and true after any Q-value is written.
+func TestHasState_Distinguishes(t *testing.T) {
+	q := NewQLearning()
+	s := Pos{X: 5, Y: 5}
+	if q.HasState(s) {
+		t.Error("HasState should be false before any SetQ")
+	}
+	q.SetQ(s, 2, 1.5)
+	if !q.HasState(s) {
+		t.Error("HasState should be true after SetQ")
 	}
 }

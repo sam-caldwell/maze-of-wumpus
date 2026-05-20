@@ -61,6 +61,9 @@ func dfsHelper(w *world.World, cur, goal world.Pos, visited map[world.Pos]bool, 
 		if !w.Maze.IsWalkable(np) {
 			continue
 		}
+		if w.Maze.IsCornerClipped(cur, np) {
+			continue
+		}
 		if visited[np] {
 			continue
 		}

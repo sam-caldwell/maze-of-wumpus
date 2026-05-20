@@ -73,8 +73,13 @@ func runBranchAnim(w *world.World, a *world.Agent, plannedNext world.Pos) (world
 // hazard, cardinal neighbor of `a`, EXCLUDING the cell the agent
 // just came from (so an in-corridor step doesn't read as a branch).
 func branchCandidates(w *world.World, a *world.Agent) []world.Pos {
-	out := make([]world.Pos, 0, 4)
-	for _, d := range world.Cardinals {
+	out := make([]world.Pos, 0, world.CardinalCount)
+	// Branch animation uses STRICT cardinals only — diagonal
+	// neighbors would make almost every cell a "branch" and the
+	// ghost-fanout effect would fire constantly. The first
+	// CardinalCount entries of world.Cardinals are the 4
+	// axis-aligned directions.
+	for _, d := range world.Cardinals[:world.CardinalCount] {
 		np := world.Pos{X: a.Pos.X + d.X, Y: a.Pos.Y + d.Y}
 		if !w.Maze.IsWalkable(np) {
 			continue

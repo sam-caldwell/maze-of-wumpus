@@ -10,6 +10,7 @@
 package world
 
 import (
+	"math"
 	"math/rand"
 )
 
@@ -125,6 +126,7 @@ func NewAgentBeliefs() *AgentBeliefs {
 // OnPathSteps / OffPathSteps reset on respawn; BestAlignment doesn't.
 type AgentStats struct {
 	Deaths            int
+	Starts            int
 	WumpusKilled      int
 	GoalsReached      int
 	ActualDistance    int
@@ -148,22 +150,28 @@ type AgentStats struct {
 	LastSolveTime int
 }
 
-// Score is the per-agent figure of merit: alignment with the shortest
-// path, penalizing deviation.
+// Score is the per-agent figure of merit: cumulative solves-per-cycle
+// throughput.
 //
-//	score = (OnPathSteps - OffPathSteps) / OptimalDistance
+//	score = GoalsReached / cycle
 //
-// 1.0  = flawless solve along the chosen shortest path.
-// 0.0  = equal time spent on and off the path (or no movement yet).
-// <0   = mostly off-path — the deviation penalty.
+// All quantities are in cycles of simulated time (TicksAlive,
+// MinSolveTime, MaxSolveTime, etc. are all denominated in cycles).
+// The score therefore reads as "average solves per cycle of
+// elapsed simulation" — a single number that captures how
+// efficient the agent's algorithm is overall, normalized for
+// deaths, respawn downtime, and exploration.
 //
-// Score resets on respawn (because OnPathSteps / OffPathSteps reset).
-// The sticky career best lives in BestAlignment, surfaced separately.
-func (s AgentStats) Score(optimal int) float64 {
-	if optimal <= 0 {
+// Returns 0 before any cycle has elapsed.
+//
+// OnPathSteps / OffPathSteps / BestAlignment are still maintained
+// on the struct for downstream analysis but no longer feed into the
+// Score formula.
+func (s AgentStats) Score(cycle int) float64 {
+	if cycle <= 0 {
 		return 0
 	}
-	return float64(s.OnPathSteps-s.OffPathSteps) / float64(optimal)
+	return float64(s.GoalsReached) / float64(cycle)
 }
 
 // Agent: one of the five competing automata.
@@ -175,7 +183,6 @@ type Agent struct {
 	Plan       []Pos
 	Strategy   Strategy
 	Beliefs    *AgentBeliefs
-	QL         *QLearning
 	DQN        *DQN
 	RespawnIn  int
 	Water      int
@@ -217,19 +224,261 @@ type Agent struct {
 	// freezes the agent in place until the animation finishes. See
 	// SearchAnim doc for the state-machine semantics.
 	SearchAnim *SearchAnim
+
+	// KnownCells is the agent's perceived terrain — every cell it
+	// has personally stood on PLUS the cardinal neighbors of those
+	// cells (which the agent senses on arrival). Populated by
+	// MoveAgents / RespawnAgents. Partial-observability-respecting
+	// strategies (agents 1, 4, 5, 6, 7) gate planning on this set so
+	// the agent never routes through cells it hasn't seen. Agents 2
+	// and 3 keep omniscient terrain access and ignore this field.
+	// Persists across deaths but resets on `r` reseed (new maze =
+	// fresh exploration).
+	KnownCells map[Pos]bool
+
+	// TrustScores is the per-attract-label trust an agent has built
+	// up across maps for the scent-following / scent-shaping rules.
+	// Higher score = more likely to be picked as CurrentTrustee on
+	// the next map. Negative scores cause the corresponding scent
+	// to act as an additional repel signal. Persists across reseeds
+	// (grafted by the TUI / headless reseed path) — that's where
+	// the "learning over many maps" effect comes from.
+	TrustScores map[rune]float64
+
+	// CurrentTrustee is the agent's chosen attract label for the
+	// CURRENT map — picked once at world construction (via
+	// PickTrustee, softmax over TrustScores; uniform when all
+	// scores are zero) and used for every scent-shaping decision
+	// the agent makes on this map. Cleared on `r` reseed and
+	// re-rolled by PickTrustee for the new map.
+	CurrentTrustee rune
+
+	// JourneyTrusteeContactTicks counts the ticks during the
+	// current journey on which the agent stood on a cell carrying
+	// CurrentTrustee's scent. Reset at journey start. Used by
+	// endJourney to decide whether the trustee actually influenced
+	// the outcome:
+	//
+	//   contact < MinTrusteeContactTicks → endJourney is a no-op
+	//                                       (no reward, no penalty —
+	//                                        the agent "lost the
+	//                                        scent" and the outcome
+	//                                        carries no information
+	//                                        about the trustee).
+	//   contact ≥ threshold              → apply the normal
+	//                                       success/failure trust
+	//                                       update.
+	JourneyTrusteeContactTicks int
+
+	// CurrentStrategy is the algorithm letter (R/S/T/U/V/W/X) the
+	// agent is using for THIS journey. Picked at the start of each
+	// life by PickStrategy. Drives action selection through the
+	// world's strategyForLetter dispatch.
+	CurrentStrategy rune
+
+	// StrategyTrustScores records the agent's accumulated trust in
+	// each algorithm letter. Higher score → softmax pick favors
+	// that strategy. Updated in endJourney based on outcome
+	// (reached goal + speed vs prior best).
+	StrategyTrustScores map[rune]float64
+
+	// StrategyBestSolveTime is the agent's best TicksAlive value
+	// for each strategy that reached the goal. Used by endJourney
+	// to give a bonus when a new run improves on the prior best
+	// for the same (agent, strategy) pair.
+	StrategyBestSolveTime map[rune]int
+
+	// KnownShortestPath is the agent's currently-cached optimal
+	// route from EntrancePos to GoalPos through its KnownCells,
+	// computed by World.optimizeKnownPath each time the agent
+	// reaches the goal. PO strategies consult this path first and
+	// fall back to native planning when the next step is now
+	// hazardous / unwalkable. Reset implicitly on reseed (new
+	// world → new Agent struct → zero value).
+	KnownShortestPath []Pos
+
+	// SensingRadius bounds the BFS depth of MarkAgentSensed (the
+	// agent's perception range). 0 or 1 = the legacy 1-step
+	// "current cell + 4 cardinal neighbors" range; 2 = a wider
+	// "current cell + every wall-respecting cell reachable in ≤2
+	// cardinal steps" range. Used by the far-sight agents 8/9/A/B/C
+	// (clones of 3/4/5/6/7 with radius 2).
+	SensingRadius int
+
+	// LearnedTTL is the agent's belief about how many steps it can
+	// take before the TTL killer fires. 0 means "unknown" (the
+	// agent has never died of TTL on a map this large).
+	//
+	// Maintained by two complementary signals (learn-by-dying is
+	// ALWAYS active so the agent keeps re-learning if TTL drifts):
+	//
+	//   record: on any TTL death (KillAgent reason="ttl"), we set
+	//           LearnedTTL = ActualDistance − 1 — the world's TTL
+	//           killer is deterministic so a single death pins the
+	//           value down to within ±1 step.
+	//
+	//   invalidate: if the agent SURVIVES past its current
+	//               LearnedTTL (per-step check in MoveAgents),
+	//               the estimate is stale (TTL grew between maps
+	//               or by config change). Drop it and wait for
+	//               the next TTL death to re-pin.
+	//
+	// Grafted across reseed as a prior — useful for the first
+	// journey of a new map until either signal updates it.
+	LearnedTTL int
 }
 
 // Wumpus: adversarial automaton.
 type Wumpus struct {
-	ID              int
-	Pos             Pos
-	Alive           bool
+	ID    int
+	Pos   Pos
+	Alive bool
+	// Aggressiveness in [0, WumpusAggressionMax]. 0 → opportunistic
+	// (lazy random wander; only kills agents who walk adjacent on
+	// their own). WumpusAggressionMax → actively hunts agents via
+	// scent every tick. Assigned uniformly at random when the
+	// wumpus is constructed (NewWorldWithConfig or
+	// SpawnReplacementWumpus). The same value is also displayed by
+	// the wumpus's strategy at decision time — see
+	// wumpus.HuntStrategy.
+	Aggressiveness int
+	// HuntMode picks one of three strategies (Bayesian-smell,
+	// Wander+scent, Crowd-hunt) for the lifetime of the wumpus.
+	// Assigned uniformly at construction.
+	HuntMode        WumpusHuntMode
 	Strategy        WumpusStrategy
 	QL              *QLearning
 	DQN             *DQN
 	CyclesSinceKill int
 	VengeanceCycles int
 }
+
+// WumpusAggressionMax is the upper bound of Wumpus.Aggressiveness;
+// matches the 0-15 trust heat scale so the value fits the same
+// visual encoding if exposed in the UI later.
+const WumpusAggressionMax = 15
+
+// WumpusHuntMode picks which of three hunting strategies a wumpus
+// uses for its entire life. Assigned at construction.
+type WumpusHuntMode int
+
+const (
+	// WumpusHuntBayesian — inductive Bayesian reasoning with smell
+	// detection: the wumpus scores its cardinal neighbors by the
+	// strongest agent-scent freshness within smelling range and
+	// moves toward the inferred agent direction. Aggressiveness
+	// scales the commit ratio (lower aggression → more random
+	// noise per step).
+	WumpusHuntBayesian WumpusHuntMode = iota
+	// WumpusHuntWander — random walk lightly attracted by agent
+	// scent. Even at full aggressiveness this stays exploratory
+	// (50% scent-bias / 50% random at max).
+	WumpusHuntWander
+	// WumpusHuntCrowd — swarm hunting. Every crowd-hunt wumpus
+	// shares its detections (alive agents within DetectionRadius)
+	// and converges on the nearest one in the union.
+	WumpusHuntCrowd
+)
+
+// WumpusHuntModeCount is the number of distinct hunt modes; used by
+// the spawn code to pick uniformly.
+const WumpusHuntModeCount = 3
+
+// SwarmStrategyLetter is the strategy letter whose agents share
+// knowledge (KnownCells, Beliefs, KnownShortestPath) with their
+// peers. Currently 'S' (Swarm-Bayesian). Kept here so the world
+// package can detect swarm members without importing strategy/.
+// The strategy package re-exports this as StrategySwarmBayesian.
+const SwarmStrategyLetter rune = 'S'
+
+// SwarmMinQuorum is the smallest viable size for the S swarm. If
+// fewer than this many agents are alive on S after RespawnAgents
+// finishes, EnforceSwarmQuorum drafts alive non-S agents into the
+// swarm until the quorum is met (or no more agents can be drafted).
+// A swarm of 1-2 doesn't really share meaningful knowledge so we
+// guarantee the strategy operates as designed by topping it up.
+const SwarmMinQuorum = 3
+
+// BenchmarkStrategyLetter is the omniscient BFS strategy used as
+// the reference benchmark. Reserved as a singleton — at most
+// MaxBenchmarkAgents (1) alive agent runs it per tick. Lets the
+// other strategies compare against one clean baseline rather than
+// a chorus of identical optimal solvers.
+const (
+	BenchmarkStrategyLetter rune = 'R'
+	MaxBenchmarkAgents           = 1
+)
+
+// StrategyUsesScent reports whether a strategy letter's decision
+// pipeline actually consults the scent channel. Used by the
+// respawn flow to gate trustee selection: agents on strategies
+// that ignore scent shouldn't pick a leader to "follow," since
+// they'd never actually sense the trail and the trustee would
+// just absorb unearned penalties at journey end.
+//
+//	U scent-follower — yes (planner reads ScentOwner / ScentFreshness)
+//	V dqn            — yes (cardinal scent features in DqnInput)
+//	W pomcp          — yes (scent weighting in rollouts)
+//	X qmdp           — yes (ScentSignedFreshness in utility score)
+//	R / S / T        — no (BFS / swarm-Bayesian / Bayesian, scent-blind)
+func StrategyUsesScent(letter rune) bool {
+	switch letter {
+	case 'U', 'V', 'W', 'X':
+		return true
+	}
+	return false
+}
+
+// WumpusHuntModeDescription returns a short (≤64 char) human-
+// readable description of a wumpus hunt mode. Used by the TUI's
+// Wumpus Strategies legend.
+func WumpusHuntModeDescription(mode WumpusHuntMode) string {
+	switch mode {
+	case WumpusHuntBayesian:
+		return "Inductive Bayesian smell-tracking; aggressiveness gates commit"
+	case WumpusHuntWander:
+		return "Random walk lightly biased by agent scent"
+	case WumpusHuntCrowd:
+		return "Swarm hunting: shared sightings, BFS to nearest detected agent"
+	}
+	return "unknown"
+}
+
+// ActiveWumpusModes returns the set of WumpusHuntMode values
+// currently in use by at least one alive wumpus, in spawn order
+// and deduplicated. The TUI's Wumpus Strategies legend lists only
+// these — modes whose wumpus all died (or were never spawned)
+// don't render.
+func (w *World) ActiveWumpusModes() []WumpusHuntMode {
+	seen := map[WumpusHuntMode]bool{}
+	out := make([]WumpusHuntMode, 0, WumpusHuntModeCount)
+	for _, wm := range w.Wumpus {
+		if !wm.Alive || seen[wm.HuntMode] {
+			continue
+		}
+		seen[wm.HuntMode] = true
+		out = append(out, wm.HuntMode)
+	}
+	return out
+}
+
+// WumpusModeCount returns the number of currently-alive wumpus
+// using the given hunt mode. Surfaced by the TUI's Wumpus
+// Strategies legend so each row can show "<count>  <description>".
+func (w *World) WumpusModeCount(mode WumpusHuntMode) int {
+	n := 0
+	for _, wm := range w.Wumpus {
+		if wm.Alive && wm.HuntMode == mode {
+			n++
+		}
+	}
+	return n
+}
+
+// WumpusDetectionRadius bounds how close a crowd-hunt wumpus must
+// be to an alive agent to add that agent to the shared sighting
+// pool. Manhattan distance. 5 cells = roughly "around the corner."
+const WumpusDetectionRadius = 5
 
 // Stats are world-wide counters.
 type Stats struct {
@@ -255,7 +504,23 @@ type World struct {
 	Heat   [BoardHeight][BoardWidth]bool
 	Stench [BoardHeight][BoardWidth]bool
 
+	// ScentOwner[y][x]: label of the most recent agent to walk this
+	// cell, 0 = unscented. ScentCycle[y][x]: World.Cycle at deposit
+	// time, 0 = unscented. Together they drive the freshness signal
+	// agent 6 follows (decays linearly to zero over ScentMaxAge
+	// cycles).
 	ScentOwner [BoardHeight][BoardWidth]rune
+	ScentCycle [BoardHeight][BoardWidth]int
+
+	// Events is the rolling log of agent-lifecycle moments
+	// (deaths / goal reaches). Appended in order; the TUI shows
+	// the last EventsVisible entries. Capped at EventBufferSize.
+	Events []Event
+
+	// StrategyPerf accumulates per-strategy run-end counts since
+	// the last reseed. Indexed by strategy letter. Surfaced by
+	// the TUI's Strategy Performance table.
+	StrategyPerf map[rune]*StrategyPerfCounts
 
 	AgentAt  [BoardHeight][BoardWidth]*Agent
 	WumpusAt [BoardHeight][BoardWidth]*Wumpus
@@ -307,6 +572,23 @@ type World struct {
 	Rng               *rand.Rand
 	wumpusStrategyFn  func(*rand.Rand) WumpusStrategy // factory for new wumpus
 	vengeanceStrategy WumpusStrategy
+	// strategyForLetter dispatches per-journey strategy by letter
+	// (R/S/T/U/V/W/X). Plumbed in from Config.StrategyForLetter so
+	// the world package never imports strategy/.
+	strategyForLetter func(rune) Strategy
+	// strategyLetters is the canonical list of available strategy
+	// letters (e.g. {'R','S','T','U','V','W','X'}) used by
+	// PickStrategy. Plumbed via Config.StrategyLetters.
+	strategyLetters []rune
+	// swarmGraph caches the most-recently computed pruned alive-
+	// cell set for strategy-S members. Updated lazily by
+	// RecomputeSwarmGraphIfStale when the swarm's KnownCells union
+	// grows. See swarm_graph.go.
+	swarmGraph swarmGraphState
+	// strategyDescriptionForLetter renders a strategy letter as a
+	// ≤64-char description. Plumbed via
+	// Config.StrategyDescriptionForLetter.
+	strategyDescriptionForLetter func(rune) string
 }
 
 // MinAcceptablePaths: a generated maze must have at least this many
@@ -315,9 +597,14 @@ const MinAcceptablePaths = 3
 
 // Config selects construction-time options for NewWorldWithConfig.
 //
-// StrategyFor: returns the Strategy for an agent given its label. If
-// nil, agents are constructed with nil Strategy and MoveAgents falls
-// back to FallbackMove.
+// StrategyFor: legacy label → Strategy lookup. Kept for tests; the
+// per-journey runtime now dispatches via StrategyForLetter and the
+// agent's CurrentStrategy.
+//
+// StrategyForLetter: letter (R/S/T/U/V/W/X) → Strategy. Used at every
+// per-tick action step to dispatch the agent's currently-picked
+// strategy. Required when agents are allowed to switch strategies
+// at runtime (which is the default).
 //
 // WumpusStrategy: factory called for each new wumpus. If nil, wumpus
 // are constructed with nil Strategy and do not move.
@@ -329,8 +616,18 @@ const MinAcceptablePaths = 3
 type Config struct {
 	Seed              int64
 	StrategyFor       func(rune) Strategy
-	WumpusStrategy    func(*rand.Rand) WumpusStrategy
-	VengeanceStrategy WumpusStrategy
+	StrategyForLetter func(rune) Strategy
+	// StrategyLetters is the runtime list of strategy letters
+	// available to PickStrategy (typically strategy.StrategyLetters).
+	// Nil disables per-journey switching and the agent's legacy
+	// Strategy field is used instead.
+	StrategyLetters []rune
+	// StrategyDescriptionForLetter returns a human-readable (≤64
+	// char) description for a strategy letter — surfaced by the
+	// TUI's Agent-Algorithm Trust legend.
+	StrategyDescriptionForLetter func(rune) string
+	WumpusStrategy               func(*rand.Rand) WumpusStrategy
+	VengeanceStrategy            WumpusStrategy
 }
 
 // NewWorld is the convenience entry point: builds a world from a seed
@@ -344,19 +641,25 @@ func NewWorld(seed int64) *World {
 // from cfg; nil callbacks leave the corresponding Strategy fields nil.
 func NewWorldWithConfig(cfg Config) *World {
 	w := &World{
-		Seed:              cfg.Seed,
-		Rng:               rand.New(rand.NewSource(cfg.Seed)),
-		wumpusStrategyFn:  cfg.WumpusStrategy,
-		vengeanceStrategy: cfg.VengeanceStrategy,
-		// Hazard / TTL toggles default to DISABLED so a freshly-
-		// constructed world is friendly to RL convergence. Operators
-		// can re-enable each one at runtime via the 'w' / 'f' / 't'
-		// keys, or by setting the corresponding *Disabled field
-		// directly before stepping.
+		Seed:                         cfg.Seed,
+		Rng:                          rand.New(rand.NewSource(cfg.Seed)),
+		wumpusStrategyFn:             cfg.WumpusStrategy,
+		vengeanceStrategy:            cfg.VengeanceStrategy,
+		strategyForLetter:            cfg.StrategyForLetter,
+		strategyLetters:              cfg.StrategyLetters,
+		strategyDescriptionForLetter: cfg.StrategyDescriptionForLetter,
+		// Hazard toggles default to DISABLED so a freshly-
+		// constructed world is friendly to RL convergence.
+		// Operators can re-enable each one at runtime via the
+		// 'w' / 'f' keys.
+		//
+		// TTL defaults to ENABLED so agents have a real failure
+		// signal to learn from (LearnedTTL only updates on TTL
+		// deaths). Operators can disable it with 't'.
 		WumpusDisabled:    true,
 		FirePitsDisabled:  true,
 		WaterPitsDisabled: true,
-		TTLDisabled:       true,
+		TTLDisabled:       false,
 	}
 	for attempt := 0; attempt < 50; attempt++ {
 		w.Maze = GenerateMaze(w.Rng)
@@ -386,7 +689,7 @@ func NewWorldWithConfig(cfg Config) *World {
 	numWumpus := 5 + w.Rng.Intn(8)
 	for i := 0; i < numWumpus; i++ {
 		p := w.RandomWumpusSpawn()
-		wm := &Wumpus{ID: w.nextWumpusID, Pos: p, Alive: true, Strategy: w.newWumpusStrategy()}
+		wm := &Wumpus{ID: w.nextWumpusID, Pos: p, Alive: true, Strategy: w.newWumpusStrategy(), Aggressiveness: w.Rng.Intn(WumpusAggressionMax + 1), HuntMode: WumpusHuntMode(w.Rng.Intn(WumpusHuntModeCount))}
 		w.nextWumpusID++
 		w.Wumpus = append(w.Wumpus, wm)
 		w.WumpusAt[p.Y][p.X] = wm
@@ -396,20 +699,36 @@ func NewWorldWithConfig(cfg Config) *World {
 	if stratFor == nil {
 		stratFor = func(rune) Strategy { return nil }
 	}
-	w.Agents = []*Agent{
-		newAgent(&w.nextAgentID, '1', stratFor('1'), NewAgentBeliefs(), 1),
-		newAgent(&w.nextAgentID, '2', stratFor('2'), nil, 4),
-		newAgent(&w.nextAgentID, '3', stratFor('3'), nil, 7),
-		newAgent(&w.nextAgentID, '4', stratFor('4'), nil, 10),
-		newAgent(&w.nextAgentID, '5', stratFor('5'), nil, 13),
-		newAgent(&w.nextAgentID, '6', stratFor('6'), NewAgentBeliefs(), 16),
-		newAgent(&w.nextAgentID, '7', stratFor('7'), NewAgentBeliefs(), 19),
+	// Per-journey strategy switching means EVERY agent can run ANY
+	// algorithm, so every agent gets the union of state slots needed
+	// by any strategy: AgentBeliefs (Bayesian / scent-follower /
+	// POMCP / QMDP) and DQN (deep Q-network). DQN weights take ~1KB
+	// per agent — negligible at 12 agents.
+	labels := []rune{'1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C'}
+	respawnOffsets := []int{1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31, 34}
+	w.Agents = make([]*Agent, 0, len(labels))
+	for i, l := range labels {
+		a := newAgent(&w.nextAgentID, l, stratFor(l), NewAgentBeliefs(), respawnOffsets[i])
+		a.DQN = NewDQN(w.Rng)
+		w.Agents = append(w.Agents, a)
 	}
-	// Agent 1 is enabled by default; agents 2..7 stay disabled until
-	// the user toggles them via the '2'..'7' keys.
-	w.Agents[0].Disabled = false
-	w.Agents[3].QL = NewQLearning()
-	w.Agents[4].DQN = NewDQN(w.Rng)
+	// All twelve agents start enabled — the user toggles individual
+	// agents off (or back on) via their label key.
+	for _, a := range w.Agents {
+		a.Disabled = false
+	}
+	// Far-sight perception range: labels 8, 9, A, B, C get
+	// SensingRadius=2; everyone else defaults to 1.
+	for _, a := range w.Agents {
+		switch a.Label {
+		case '8', '9', 'A', 'B', 'C':
+			a.SensingRadius = 2
+		}
+	}
+
+	// Initial CurrentTrustee is left at 0; RespawnAgents calls
+	// PickTrustee the moment each follower agent comes alive (and
+	// again at the start of every subsequent journey).
 
 	w.Stats.OptimalDistance = w.ShortestPathLength(w.Maze.EntrancePos, w.Maze.GoalPos)
 	w.Stats.ShortestPaths = w.CountShortestPaths(w.Maze.EntrancePos, w.Maze.GoalPos, MaxShortestPathsCount)
@@ -420,6 +739,12 @@ func NewWorldWithConfig(cfg Config) *World {
 	// hazard-free board; tests that need entities re-spawn them via
 	// EnableHazards.
 	w.ApplyToggles()
+	// First event in the rolling log is a random pick from the
+	// startingMessages pool — surfaces a friendly cue in the TUI
+	// before any death/goal happens. Yellow (neutral) so it reads
+	// distinct from the red death / green goal messages that
+	// follow.
+	w.RecordEvent("yellow", w.pickTemplate(startingMessages))
 	return w
 }
 
@@ -448,6 +773,9 @@ func (w *World) computeDistFromStart() {
 			if !w.Maze.IsWalkable(np) {
 				continue
 			}
+			if w.Maze.IsCornerClipped(cur, np) {
+				continue
+			}
 			if w.DistFromStart[np.Y][np.X] != -1 {
 				continue
 			}
@@ -455,6 +783,67 @@ func (w *World) computeDistFromStart() {
 			queue = append(queue, np)
 		}
 	}
+}
+
+// DijkstraPath returns the min-cost path from `from` to `to` over
+// the 8-connected grid, weighted by StepCost (cardinal=10,
+// diagonal=14). Only cells where `walkable(p)` returns true are
+// considered; corner-clipped diagonal moves are rejected. Returns
+// nil when no path exists; the returned slice does NOT include
+// `from` (so len(path) == step count).
+//
+// Exported so the strategy package can use it for PO-respecting
+// planning without re-implementing weighted shortest-paths.
+func (w *World) DijkstraPath(from, to Pos, walkable func(Pos) bool) []Pos {
+	if from == to {
+		return nil
+	}
+	dist := map[Pos]int{from: 0}
+	prev := map[Pos]Pos{}
+	type item struct {
+		pos  Pos
+		cost int
+	}
+	pq := []item{{from, 0}}
+	for len(pq) > 0 {
+		// Extract-min (simple linear scan; grid is small).
+		mi := 0
+		for i := 1; i < len(pq); i++ {
+			if pq[i].cost < pq[mi].cost {
+				mi = i
+			}
+		}
+		cur := pq[mi]
+		pq[mi] = pq[len(pq)-1]
+		pq = pq[:len(pq)-1]
+		if cur.cost > dist[cur.pos] {
+			continue
+		}
+		if cur.pos == to {
+			var path []Pos
+			for p := to; p != from; p = prev[p] {
+				path = append([]Pos{p}, path...)
+			}
+			return path
+		}
+		for _, d := range Cardinals {
+			np := Pos{X: cur.pos.X + d.X, Y: cur.pos.Y + d.Y}
+			if !InBounds(np.X, np.Y) || !walkable(np) {
+				continue
+			}
+			if w.Maze.IsCornerClipped(cur.pos, np) {
+				continue
+			}
+			newCost := cur.cost + StepCost(d)
+			if cd, ok := dist[np]; ok && newCost >= cd {
+				continue
+			}
+			dist[np] = newCost
+			prev[np] = cur.pos
+			pq = append(pq, item{np, newCost})
+		}
+	}
+	return nil
 }
 
 // newWumpusStrategy returns a Strategy for a freshly-spawned wumpus
@@ -466,65 +855,72 @@ func (w *World) newWumpusStrategy() WumpusStrategy {
 	return w.wumpusStrategyFn(w.Rng)
 }
 
-// ShortestPathSet returns the set of cells on ONE chosen shortest
-// path from `from` to `to`. Used by the TUI 's' overlay.
+// ShortestPathSet returns the set of cells on ONE Dijkstra-minimum-
+// cost path from `from` to `to`. When from == to, returns the
+// singleton {from}. Empty set when no path exists.
+// Used by the TUI 's' overlay.
 func (w *World) ShortestPathSet(from, to Pos) map[Pos]bool {
 	set := map[Pos]bool{}
-	type node struct {
-		Pos
-		parent int
+	if from == to {
+		set[from] = true
+		return set
 	}
-	nodes := []node{{from, -1}}
-	visited := map[Pos]int{from: 0}
-	for head := 0; head < len(nodes); head++ {
-		cur := nodes[head]
-		if cur.Pos == to {
-			for i := head; i != -1; i = nodes[i].parent {
-				set[nodes[i].Pos] = true
-			}
-			return set
-		}
-		for _, d := range Cardinals {
-			np := Pos{cur.X + d.X, cur.Y + d.Y}
-			if !w.Maze.IsWalkable(np) {
-				continue
-			}
-			if _, seen := visited[np]; seen {
-				continue
-			}
-			visited[np] = len(nodes)
-			nodes = append(nodes, node{np, head})
-		}
+	path := w.DijkstraPath(from, to, w.Maze.IsWalkable)
+	if len(path) == 0 {
+		return set
+	}
+	set[from] = true
+	for _, p := range path {
+		set[p] = true
 	}
 	return set
 }
 
-// CountShortestPaths returns the number of distinct shortest-length
-// paths from `from` to `to`, saturated at `cap`.
+// CountShortestPaths returns the number of distinct paths from
+// `from` to `to` achieving the minimum Dijkstra cost, saturated at
+// `cap`. Edge weights match the global step costs.
 func (w *World) CountShortestPaths(from, to Pos, cap int) int {
 	dist := map[Pos]int{from: 0}
 	paths := map[Pos]int{from: 1}
-	queue := []Pos{from}
 	clamp := func(v int) int {
 		if v > cap {
 			return cap
 		}
 		return v
 	}
-	for len(queue) > 0 {
-		cur := queue[0]
-		queue = queue[1:]
+	type item struct {
+		pos  Pos
+		cost int
+	}
+	pq := []item{{from, 0}}
+	for len(pq) > 0 {
+		mi := 0
+		for i := 1; i < len(pq); i++ {
+			if pq[i].cost < pq[mi].cost {
+				mi = i
+			}
+		}
+		cur := pq[mi]
+		pq[mi] = pq[len(pq)-1]
+		pq = pq[:len(pq)-1]
+		if cur.cost > dist[cur.pos] {
+			continue
+		}
 		for _, d := range Cardinals {
-			np := Pos{cur.X + d.X, cur.Y + d.Y}
-			if !w.Maze.IsWalkable(np) {
+			np := Pos{X: cur.pos.X + d.X, Y: cur.pos.Y + d.Y}
+			if !InBounds(np.X, np.Y) || !w.Maze.IsWalkable(np) {
 				continue
 			}
-			if _, seen := dist[np]; !seen {
-				dist[np] = dist[cur] + 1
-				paths[np] = clamp(paths[cur])
-				queue = append(queue, np)
-			} else if dist[np] == dist[cur]+1 {
-				paths[np] = clamp(paths[np] + paths[cur])
+			if w.Maze.IsCornerClipped(cur.pos, np) {
+				continue
+			}
+			newCost := cur.cost + StepCost(d)
+			if cd, ok := dist[np]; !ok || newCost < cd {
+				dist[np] = newCost
+				paths[np] = clamp(paths[cur.pos])
+				pq = append(pq, item{np, newCost})
+			} else if newCost == cd {
+				paths[np] = clamp(paths[np] + paths[cur.pos])
 			}
 		}
 	}
@@ -545,37 +941,17 @@ func newAgent(idCounter *int, label rune, strat Strategy, beliefs *AgentBeliefs,
 	return a
 }
 
-// ShortestPathLength does a wall-only BFS from `from` to `to`. Returns
-// 0 if unreachable.
+// ShortestPathLength returns the STEP COUNT of the Dijkstra-min-cost
+// path from `from` to `to`. Returns 0 if unreachable. Step count
+// rather than cost so TTL math (ActualDistance vs OptimalDistance)
+// stays consistent — both are counts of moves regardless of
+// direction.
 func (w *World) ShortestPathLength(from, to Pos) int {
 	if from == to {
 		return 0
 	}
-	type node struct {
-		Pos
-		dist int
-	}
-	visited := map[Pos]bool{from: true}
-	queue := []node{{from, 0}}
-	for len(queue) > 0 {
-		cur := queue[0]
-		queue = queue[1:]
-		for _, d := range Cardinals {
-			np := Pos{cur.X + d.X, cur.Y + d.Y}
-			if !w.Maze.IsWalkable(np) {
-				continue
-			}
-			if visited[np] {
-				continue
-			}
-			if np == to {
-				return cur.dist + 1
-			}
-			visited[np] = true
-			queue = append(queue, node{np, cur.dist + 1})
-		}
-	}
-	return 0
+	path := w.DijkstraPath(from, to, w.Maze.IsWalkable)
+	return len(path)
 }
 
 // RandomWumpusSpawn returns an unoccupied walkable cell at least 20
@@ -694,6 +1070,7 @@ func (w *World) ResolveCombat() {
 			if w.Rng.Float64() < 0.5 {
 				w.KillWumpus(wm)
 				a.Stats.WumpusKilled++
+				w.recordAgentWumpusKill(a)
 			} else {
 				w.KillAgent(a, "wumpus")
 				wm.CyclesSinceKill = 0
@@ -743,7 +1120,16 @@ func (w *World) MoveAgents() {
 			continue
 		}
 		var target Pos
-		if a.Strategy != nil {
+		// Dispatch order: CurrentStrategy via letter (per-journey
+		// pick) wins. Fall back to the legacy a.Strategy if no
+		// letter is set (older construction paths / tests).
+		if a.CurrentStrategy != 0 && w.strategyForLetter != nil {
+			if s := w.strategyForLetter(a.CurrentStrategy); s != nil {
+				target = s(w, a)
+			} else {
+				target = a.Pos
+			}
+		} else if a.Strategy != nil {
 			target = a.Strategy(w, a)
 		} else {
 			target = a.Pos
@@ -772,8 +1158,10 @@ func (w *World) MoveAgents() {
 		oldPos := a.Pos
 		w.AgentAt[a.Pos.Y][a.Pos.X] = nil
 		w.ScentOwner[a.Pos.Y][a.Pos.X] = a.Label
+		w.ScentCycle[a.Pos.Y][a.Pos.X] = w.Cycle
 		a.Pos = target
 		w.AgentAt[target.Y][target.X] = a
+		w.MarkAgentSensed(a)
 		a.Stats.ActualDistance++
 		// Path-alignment bookkeeping: ShortestPathCells holds one
 		// chosen shortest entrance→goal route; landing on it counts
@@ -839,14 +1227,26 @@ func (w *World) MoveAgents() {
 		}
 		a.LastFromCell = oldPos
 		a.HasLastFrom = true
+		a.PendingBonus += w.ApplyScentShaping(a)
 		if !w.TTLDisabled && w.Stats.OptimalDistance > 0 && a.Stats.ActualDistance > TTLMultiplier*w.Stats.OptimalDistance {
 			w.KillAgent(a, "ttl")
+		}
+		// Learn-by-dying invalidation half: if the agent's still
+		// alive and has already taken more steps than its
+		// LearnedTTL belief, that belief is stale (TTL grew, or
+		// the new map's TTL is larger than the prior grafted
+		// estimate). Drop it so the next TTL death re-pins.
+		if a.Alive && a.LearnedTTL > 0 && a.Stats.ActualDistance > a.LearnedTTL {
+			a.LearnedTTL = 0
 		}
 	}
 }
 
 // CanMoveTo reports whether agent `a` could legally move to `target`
-// this tick. Same-cell is treated as NOT a valid move.
+// this tick. Same-cell is treated as NOT a valid move. Other agents
+// do NOT block — agents may overlap on the same cell. Wumpus and
+// fire-pit blocking are handled separately in MoveAgents (gated on
+// the corresponding toggle).
 func (w *World) CanMoveTo(a *Agent, target Pos) bool {
 	if target == a.Pos {
 		return false
@@ -854,10 +1254,20 @@ func (w *World) CanMoveTo(a *Agent, target Pos) bool {
 	if !InBounds(target.X, target.Y) {
 		return false
 	}
+	// Disallow moves longer than a single Moore step (|dx| ≤ 1,
+	// |dy| ≤ 1). Same-cell already filtered above.
+	dx := target.X - a.Pos.X
+	dy := target.Y - a.Pos.Y
+	if dx < -1 || dx > 1 || dy < -1 || dy > 1 {
+		return false
+	}
 	if !w.Maze.IsWalkable(target) {
 		return false
 	}
-	if other := w.AgentAt[target.Y][target.X]; other != nil && other != a && other.Alive {
+	// Corner-clipping: diagonal moves require both orthogonal-
+	// adjacent cells to also be walkable. Prevents agents from
+	// squeezing through a one-cell diagonal gap between walls.
+	if w.Maze.IsCornerClipped(a.Pos, target) {
 		return false
 	}
 	return true
@@ -1067,11 +1477,44 @@ func (w *World) CollectWater() {
 	}
 }
 
+// MaxStartsPerMaze is the per-agent spawn cap for a single maze.
+// Once Stats.Starts hits this value, the agent retires for the
+// remainder of the maze and stops respawning.
+const MaxStartsPerMaze = 999
+
+// MazeSolvedGoals is the per-agent goal-reach threshold that
+// counts toward the win condition: when at least
+// MazeSolvedAgentCount agents have GoalsReached >= MazeSolvedGoals
+// the maze is considered solved.
+const MazeSolvedGoals = 999
+const MazeSolvedAgentCount = 3
+
+// MazeSolved reports whether the win condition is met:
+// MazeSolvedAgentCount agents have reached GoalsReached >=
+// MazeSolvedGoals on the current maze.
+func (w *World) MazeSolved() bool {
+	hit := 0
+	for _, a := range w.Agents {
+		if a.Stats.GoalsReached >= MazeSolvedGoals {
+			hit++
+			if hit >= MazeSolvedAgentCount {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // RespawnAgents counts respawn timers down; at 0 it places the agent
-// at the entrance (or holds if another agent is there).
+// at the entrance. Agents may share the entrance cell at spawn time.
+// Once Stats.Starts >= MaxStartsPerMaze the agent retires — no more
+// spawns until the maze is reseeded.
 func (w *World) RespawnAgents() {
 	for _, a := range w.Agents {
 		if a.Disabled || a.Alive {
+			continue
+		}
+		if a.Stats.Starts >= MaxStartsPerMaze {
 			continue
 		}
 		if a.RespawnIn > 0 {
@@ -1081,10 +1524,25 @@ func (w *World) RespawnAgents() {
 			continue
 		}
 		entrance := w.Maze.EntrancePos
-		if other := w.AgentAt[entrance.Y][entrance.X]; other != nil && other.Alive {
-			continue
-		}
 		a.Alive = true
+		a.Stats.Starts++
+		// New journey begins. Pick the strategy FIRST (50% softmax
+		// over trust, 50% uniform random); the trustee decision
+		// gates on whether the chosen strategy can even sense
+		// scent.
+		if len(w.strategyLetters) > 0 {
+			a.PickStrategy(w.strategyLetters, w.Rng)
+		}
+		// Only pick a trustee when the chosen strategy actually
+		// consults the scent channel. Otherwise the agent would
+		// "follow" a leader it can't sense, and the leader's
+		// trust score would absorb undeserved penalties at
+		// journey end.
+		if StrategyUsesScent(a.CurrentStrategy) {
+			a.PickTrustee(w, w.Rng)
+		} else {
+			a.CurrentTrustee = 0
+		}
 		a.Pos = entrance
 		a.Plan = nil
 		a.Stats.ActualDistance = 0
@@ -1100,8 +1558,78 @@ func (w *World) RespawnAgents() {
 		a.LastDeadEndCycle = 0
 		a.MaxStartDist = 0
 		a.SearchAnim = nil
+		a.JourneyTrusteeContactTicks = 0
 		w.AgentAt[entrance.Y][entrance.X] = a
+		w.MarkAgentSensed(a)
 		a.RespawnIn = -1
+	}
+	w.EnforceSwarmQuorum()
+	w.EnforceBenchmarkSingleton()
+}
+
+// EnforceBenchmarkSingleton caps the omniscient R strategy at
+// MaxBenchmarkAgents (1) alive user at any time. If two or more
+// agents picked R this tick, the extras are demoted to plain
+// Bayesian (T) — keeping the comparison clean by ensuring at most
+// one benchmark runner is in play.
+func (w *World) EnforceBenchmarkSingleton() {
+	keptOne := false
+	for _, a := range w.Agents {
+		if !a.Alive || a.Disabled {
+			continue
+		}
+		if a.CurrentStrategy != BenchmarkStrategyLetter {
+			continue
+		}
+		if !keptOne {
+			keptOne = true
+			continue
+		}
+		// Demote: T is the closest non-omniscient Bayesian relative
+		// and doesn't require scent perception or a trustee.
+		a.CurrentStrategy = 'T'
+		a.CurrentTrustee = 0
+	}
+}
+
+// EnforceSwarmQuorum guarantees that if ANY alive agent is using
+// strategy S (SwarmStrategyLetter), at least SwarmMinQuorum (3)
+// alive agents are on S. When the swarm is undersized
+// (1 or 2 members), the function drafts alive non-S agents into S
+// — overriding their PickStrategy decision for this journey — until
+// the quorum is met or the pool of draftable agents is exhausted.
+//
+// Drafted agents also have their CurrentTrustee cleared since S is
+// scent-blind (a trustee in that context would just accumulate
+// undeserved trust penalties).
+//
+// Called automatically at the end of RespawnAgents each tick.
+func (w *World) EnforceSwarmQuorum() {
+	var alive []*Agent
+	onSwarm := 0
+	for _, a := range w.Agents {
+		if !a.Alive || a.Disabled {
+			continue
+		}
+		alive = append(alive, a)
+		if a.CurrentStrategy == SwarmStrategyLetter {
+			onSwarm++
+		}
+	}
+	if onSwarm == 0 || onSwarm >= SwarmMinQuorum {
+		return
+	}
+	need := SwarmMinQuorum - onSwarm
+	for _, a := range alive {
+		if a.CurrentStrategy == SwarmStrategyLetter {
+			continue
+		}
+		a.CurrentStrategy = SwarmStrategyLetter
+		a.CurrentTrustee = 0
+		need--
+		if need == 0 {
+			return
+		}
 	}
 }
 
@@ -1170,6 +1698,21 @@ func (w *World) CheckGoal() {
 				a.Stats.BestAlignment = alignment
 			}
 		}
+		// Append this solve to build/solves/agent<label>.log BEFORE
+		// flipping Alive so the record reflects the just-finished
+		// run's TicksAlive / ActualDistance.
+		w.appendSolveRecord(a)
+		// Journey ended in success — update trust before flipping.
+		w.endJourney(a, true)
+		w.recordAgentGoal(a)
+		// Strategy Performance: goal reach bumps Win.NoFollow or
+		// Win.Following based on trustee state.
+		w.recordStrategyGoal(a)
+		// Post-win path optimization: BFS through the agent's
+		// perceived terrain to find the shortest entrance→goal
+		// route it could have taken. Subsequent lives consult this
+		// cache before running their native planner.
+		w.optimizeKnownPath(a)
 		a.Alive = false
 		if w.AgentAt[a.Pos.Y][a.Pos.X] == a {
 			w.AgentAt[a.Pos.Y][a.Pos.X] = nil
@@ -1233,7 +1776,7 @@ func (w *World) SpawnGoalHazard() {
 				}
 			}
 		} else {
-			wm := &Wumpus{ID: w.nextWumpusID, Pos: p, Alive: true, Strategy: w.newWumpusStrategy()}
+			wm := &Wumpus{ID: w.nextWumpusID, Pos: p, Alive: true, Strategy: w.newWumpusStrategy(), Aggressiveness: w.Rng.Intn(WumpusAggressionMax + 1), HuntMode: WumpusHuntMode(w.Rng.Intn(WumpusHuntModeCount))}
 			w.nextWumpusID++
 			w.Wumpus = append(w.Wumpus, wm)
 			w.WumpusAt[y][x] = wm
@@ -1245,6 +1788,8 @@ func (w *World) SpawnGoalHazard() {
 // KillAgent removes the agent from the spatial index, increments per-
 // agent death counter, records the cause, and starts the respawn timer.
 func (w *World) KillAgent(a *Agent, reason ...string) {
+	// Journey ended in failure — update trust before clearing state.
+	w.endJourney(a, false)
 	a.Alive = false
 	a.SearchAnim = nil
 	if w.AgentAt[a.Pos.Y][a.Pos.X] == a {
@@ -1256,6 +1801,18 @@ func (w *World) KillAgent(a *Agent, reason ...string) {
 		r = reason[0]
 	}
 	a.Stats.LastDeathReason = r
+	// Learn-by-dying: a TTL death pins the agent's belief about
+	// its step budget. The killer fires the first step PAST the
+	// threshold, so TTL = ActualDistance − 1. We overwrite every
+	// time so the most recent observation always wins (the policy
+	// stays alive in case TTL drifts).
+	if r == "ttl" && a.Stats.ActualDistance > 0 {
+		a.LearnedTTL = a.Stats.ActualDistance - 1
+	}
+	// Surface the death in the TUI's rolling Events log.
+	w.recordAgentDeath(a, r)
+	// Strategy Performance: tally per-strategy outcome counts.
+	w.recordStrategyDeath(a, r == "ttl")
 	a.RespawnIn = RespawnTicks
 }
 
@@ -1295,7 +1852,7 @@ func (w *World) SpawnReplacementWumpus() {
 		if AbsInt(p.X-w.Maze.EntrancePos.X)+AbsInt(p.Y-w.Maze.EntrancePos.Y) < 10 {
 			continue
 		}
-		nw := &Wumpus{ID: w.nextWumpusID, Pos: p, Alive: true, Strategy: w.newWumpusStrategy()}
+		nw := &Wumpus{ID: w.nextWumpusID, Pos: p, Alive: true, Strategy: w.newWumpusStrategy(), Aggressiveness: w.Rng.Intn(WumpusAggressionMax + 1), HuntMode: WumpusHuntMode(w.Rng.Intn(WumpusHuntModeCount))}
 		w.nextWumpusID++
 		w.Wumpus = append(w.Wumpus, nw)
 		w.WumpusAt[y][x] = nw
@@ -1360,10 +1917,12 @@ func (w *World) spawnInitialWumpus() {
 	for i := 0; i < n; i++ {
 		p := w.RandomWumpusSpawn()
 		wm := &Wumpus{
-			ID:       w.nextWumpusID,
-			Pos:      p,
-			Alive:    true,
-			Strategy: w.newWumpusStrategy(),
+			ID:             w.nextWumpusID,
+			Pos:            p,
+			Alive:          true,
+			Strategy:       w.newWumpusStrategy(),
+			Aggressiveness: w.Rng.Intn(WumpusAggressionMax + 1),
+			HuntMode:       WumpusHuntMode(w.Rng.Intn(WumpusHuntModeCount)),
 		}
 		w.nextWumpusID++
 		w.Wumpus = append(w.Wumpus, wm)
@@ -1500,6 +2059,761 @@ func (w *World) ApplyToggles() {
 	}
 }
 
+// Scent-following follower set: each follower picks a trustee per
+// journey and shapes its reward based on whether the trustee's
+// scent appears under it. The "leader" pool is the set of agents
+// that have NO scent perception themselves — they are the canonical
+// pickable trustees (plus, after stage 3, peer followers).
+//
+// Lineup mapped to scent role:
+//
+//	Leaders:    1 (BFS), 2 (DFS), 3 (Bayesian), 8 (Bayesian+fs)
+//	Followers:  4 (scent-follower),     9 (scent-follower+fs),
+//	            5 (DQN),                A (DQN+fs),
+//	            6 (POMCP),              B (POMCP+fs),
+//	            7 (QMDP),               C (QMDP+fs)
+var (
+	ScentLeaderLabels   = []rune{'1', '2', '3', '8'}
+	ScentFollowerLabels = []rune{'4', '5', '6', '7', '9', 'A', 'B', 'C'}
+)
+
+// ScentRunsForTrustWeighting: how many initial runs the agent makes
+// uniform-random picks from {1,2,3} before switching to trust-
+// weighted selection. The user-facing rule: "After the first 10
+// random selections, agents will begin using their perceived trust."
+//
+// ScentRunsForPeerExpansion: after this many runs, the agent picks
+// 50/50 between trust-weighted-{1,2,3} and uniform-peer-{4..7}\self.
+const (
+	ScentRunsForTrustWeighting = 10
+	ScentRunsForPeerExpansion  = 20
+)
+
+// IsScentFollower reports whether `label` belongs to the follower
+// set (agents 4-7). Agents 1-3 are leaders, not followers.
+func IsScentFollower(label rune) bool {
+	for _, l := range ScentFollowerLabels {
+		if l == label {
+			return true
+		}
+	}
+	return false
+}
+
+// ScentPeerLabels returns the follower-set labels EXCLUDING `self`.
+// Used in stage 3 of trustee selection (runs > ScentRunsForPeerExpansion).
+func ScentPeerLabels(self rune) []rune {
+	peers := make([]rune, 0, len(ScentFollowerLabels)-1)
+	for _, l := range ScentFollowerLabels {
+		if l != self {
+			peers = append(peers, l)
+		}
+	}
+	return peers
+}
+
+// ScentShapingMagnitude is the BASE bonus (or penalty) credited per
+// step when the agent stands on attract-scent (or dynamic-repel
+// scent). Scaled by ScentFreshness so faded trails contribute less,
+// and by ScentMagnitudeFor(label) so individual agents can have a
+// stronger pull. Sized larger than ExplorationBonus (40) so
+// following / avoiding leader scent dominates the per-step shaping
+// channel even at the 1.0 baseline multiplier.
+const ScentShapingMagnitude = 50.0
+
+// ScentMagnitudeFor returns a per-follower multiplier on
+// ScentShapingMagnitude. Agent 5 (DQN) gets a 5× boost: its Bellman
+// update competes with RealDistanceShaping deltas that can spike
+// into the hundreds when the agent reaches a new max distance from
+// the entrance, so a plain ±50 scent signal gets drowned out. The
+// stronger multiplier gives the trusted-scent gradient enough
+// weight to actually shape the network's policy.
+//
+// Other followers (4, 6, 7) keep the 1.0 baseline — agent 4 uses
+// Q-learning (lower-magnitude updates), and 6 / 7 read scent
+// directly in their planners, not through PendingBonus.
+func ScentMagnitudeFor(label rune) float64 {
+	if label == '5' {
+		return 5.0
+	}
+	return 1.0
+}
+
+// mooreDeltas is the 8-cell king-move neighborhood (cardinal +
+// diagonal) used by Moore-connected BFS for scent perception.
+var mooreDeltas = [8]Pos{
+	{X: -1, Y: -1}, {X: 0, Y: -1}, {X: 1, Y: -1},
+	{X: -1, Y: 0}, {X: 1, Y: 0},
+	{X: -1, Y: 1}, {X: 0, Y: 1}, {X: 1, Y: 1},
+}
+
+// ScentSensedCells returns the set of cells whose scent agent `a`
+// can currently perceive. Computed as a Moore-connected BFS from
+// a.Pos out to a.SensingRadius (or 1 if unset). Walls block
+// propagation — a wall cell itself is NOT included in the result
+// (walls carry no scent), but the BFS stops at walls so cells past
+// them are unreachable.
+//
+// Used by:
+//   - ApplyScentShaping (aggregate trustee / negative-trust signal).
+//   - ScentSignedFreshness (cell-level gate for DQN / QL features).
+//   - JourneyTrusteeContactTicks (contact bump for trust update).
+//
+// Radius semantics:
+//
+//	radius 0 or 1 (default for agents 1-7): current cell + 8 Moore
+//	    neighbors → up to 9 cells.
+//	radius 2 (far-sight agents 8, 9, A, B, C): up to 25 cells in a
+//	    5×5 box minus walls and cells blocked by walls.
+func (w *World) ScentSensedCells(a *Agent) map[Pos]bool {
+	radius := a.SensingRadius
+	if radius < 1 {
+		radius = 1
+	}
+	sensed := map[Pos]bool{a.Pos: true}
+	type node struct {
+		p     Pos
+		depth int
+	}
+	queue := []node{{a.Pos, 0}}
+	visited := map[Pos]bool{a.Pos: true}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur.depth >= radius {
+			continue
+		}
+		for _, d := range mooreDeltas {
+			np := Pos{X: cur.p.X + d.X, Y: cur.p.Y + d.Y}
+			if !InBounds(np.X, np.Y) || visited[np] {
+				continue
+			}
+			visited[np] = true
+			// Walls don't carry scent and they block propagation —
+			// don't add them to the sensed set and don't enqueue.
+			if w.Maze.Cells[np.Y][np.X] == CellWall {
+				continue
+			}
+			sensed[np] = true
+			queue = append(queue, node{np, cur.depth + 1})
+		}
+	}
+	return sensed
+}
+
+// ScentSignedFreshness returns the agent's signed perception of
+// scent at cell (x, y):
+//
+//	owner == a.CurrentTrustee     → +freshness  (attract)
+//	TrustScores[owner] < 0        → −freshness  (dynamic repel)
+//	otherwise                      → 0
+//
+// This is the canonical "what does agent `a` smell here?" function,
+// shared by:
+//   - DQN feature vector (agent 5) — 4 cardinal-neighbor entries
+//   - Q-learning argmax bias (agent 4)
+//   - any future perception-based learner
+//
+// Returns 0 for non-follower agents and for cells out of bounds /
+// with no fresh scent. Range: [-1, +1].
+func (w *World) ScentSignedFreshness(a *Agent, x, y int) float64 {
+	if !IsScentFollower(a.Label) {
+		return 0
+	}
+	freshness := w.ScentFreshness(x, y)
+	if freshness <= 0 {
+		return 0
+	}
+	owner := w.ScentOwner[y][x]
+	if owner == 0 {
+		return 0
+	}
+	if a.CurrentTrustee != 0 && owner == a.CurrentTrustee {
+		return freshness
+	}
+	if a.TrustScores != nil && a.TrustScores[owner] < 0 {
+		return -freshness
+	}
+	return 0
+}
+
+// ApplyScentShaping returns the per-step scent-shaping bonus for `a`
+// aggregated across every cell the agent can currently perceive
+// (a Moore-connected, wall-respecting neighborhood out to
+// a.SensingRadius — see ScentSensedCells):
+//
+//	bonus = mag × (maxTrusteeFreshness − maxNegativeTrustFreshness)
+//
+// where:
+//
+//	maxTrusteeFreshness  = strongest freshness reading from any
+//	                        sensed cell carrying CurrentTrustee scent
+//	maxNegativeTrustFreshness = strongest freshness reading from any
+//	                            sensed cell carrying a label whose
+//	                            TrustScores entry has gone negative
+//	mag = ScentShapingMagnitude × ScentMagnitudeFor(a.Label)
+//
+// There is no static-repel slot — agents are dynamically repelled
+// only by leaders/peers whose accumulated trust has gone negative.
+//
+// Side effect: if any sensed cell carries trustee scent,
+// JourneyTrusteeContactTicks is bumped by 1 (one tick of contact,
+// regardless of how many sensed cells the trustee covers).
+//
+// Factored out of MoveAgents so tests can isolate the scent
+// contribution from other PendingBonus channels.
+func (w *World) ApplyScentShaping(a *Agent) float64 {
+	if !IsScentFollower(a.Label) {
+		return 0
+	}
+	sensed := w.ScentSensedCells(a)
+	maxAttract := 0.0
+	maxRepel := 0.0
+	contact := false
+	for p := range sensed {
+		owner := w.ScentOwner[p.Y][p.X]
+		if owner == 0 {
+			continue
+		}
+		freshness := w.ScentFreshness(p.X, p.Y)
+		if freshness <= 0 {
+			continue
+		}
+		switch {
+		case a.CurrentTrustee != 0 && owner == a.CurrentTrustee:
+			contact = true
+			if freshness > maxAttract {
+				maxAttract = freshness
+			}
+		case a.TrustScores != nil && a.TrustScores[owner] < 0:
+			if freshness > maxRepel {
+				maxRepel = freshness
+			}
+		}
+	}
+	if contact {
+		a.JourneyTrusteeContactTicks++
+	}
+	if maxAttract == 0 && maxRepel == 0 {
+		return 0
+	}
+	mag := ScentShapingMagnitude * ScentMagnitudeFor(a.Label)
+	return mag * (maxAttract - maxRepel)
+}
+
+// PickTrustee selects a.CurrentTrustee for the journey that's about
+// to start, based on the agent's lifetime run count (Stats.Starts —
+// incremented in RespawnAgents BEFORE this call fires):
+//
+//  1. runs ≤ ScentRunsForTrustWeighting           → uniform pick from leaders
+//  2. runs ≤ ScentRunsForPeerExpansion            → softmax over TrustScores
+//     restricted to leaders
+//  3. runs > ScentRunsForPeerExpansion             → 50/50:
+//     heads — softmax over leaders
+//     tails — softmax over peers (followers minus self)
+//
+// `w` is used to filter candidates down to currently-ALIVE,
+// non-disabled agents — a dead leader has no scent to follow.
+// `rng` drives the random/softmax selection.
+//
+// No-op (CurrentTrustee = 0) when:
+//   - the agent is not a scent follower (it's a leader), OR
+//   - no alive candidate is available in the eligible pool — the
+//     strategy then falls back to its non-follower algorithm
+//     (outward bias / DQN / POMCP / QMDP base behavior).
+func (a *Agent) PickTrustee(w *World, rng *rand.Rand) {
+	if !IsScentFollower(a.Label) {
+		a.CurrentTrustee = 0
+		return
+	}
+	if a.TrustScores == nil {
+		a.TrustScores = map[rune]float64{}
+	}
+	leaders := aliveLabels(w, ScentLeaderLabels)
+	peers := aliveLabels(w, ScentPeerLabels(a.Label))
+	runs := a.Stats.Starts
+	switch {
+	case runs <= ScentRunsForTrustWeighting:
+		if len(leaders) == 0 {
+			a.CurrentTrustee = 0
+			return
+		}
+		a.CurrentTrustee = leaders[rng.Intn(len(leaders))]
+	case runs <= ScentRunsForPeerExpansion:
+		a.CurrentTrustee = softmaxPickLabel(rng, leaders, a.TrustScores)
+	default:
+		// 50/50 between leader pool and peer pool, with graceful
+		// fallback when one side is empty.
+		if rng.Float64() < 0.5 && len(leaders) > 0 {
+			a.CurrentTrustee = softmaxPickLabel(rng, leaders, a.TrustScores)
+		} else if len(peers) > 0 {
+			a.CurrentTrustee = softmaxPickLabel(rng, peers, a.TrustScores)
+		} else if len(leaders) > 0 {
+			a.CurrentTrustee = softmaxPickLabel(rng, leaders, a.TrustScores)
+		} else {
+			a.CurrentTrustee = 0
+		}
+	}
+}
+
+// PickStrategy selects a.CurrentStrategy for the upcoming journey
+// from the world's StrategyLetters pool:
+//
+//	50% softmax over a.StrategyTrustScores  → bias toward proven winners
+//	50% uniform random                      → keep exploring new options
+//
+// Called from RespawnAgents AFTER Stats.Starts++ and PickTrustee.
+// `letters` is the iteration order of available strategies (e.g.
+// strategy.StrategyLetters); passed by the world's wiring so the
+// world package needn't import strategy/.
+func (a *Agent) PickStrategy(letters []rune, rng *rand.Rand) {
+	if len(letters) == 0 {
+		a.CurrentStrategy = 0
+		return
+	}
+	if a.StrategyTrustScores == nil {
+		a.StrategyTrustScores = map[rune]float64{}
+	}
+	if rng.Float64() < 0.5 {
+		a.CurrentStrategy = softmaxPickLabel(rng, letters, a.StrategyTrustScores)
+		return
+	}
+	a.CurrentStrategy = letters[rng.Intn(len(letters))]
+}
+
+// StrategyLettersForWorld returns the runtime list of strategy
+// letters the world should expose to PickStrategy. Plumbed from the
+// strategy package's StrategyLetters constant via Config wiring; if
+// no letters are configured, returns nil and PickStrategy is a
+// no-op (agents keep whatever CurrentStrategy they were created
+// with, or fall back to the legacy a.Strategy field).
+func (w *World) StrategyLettersForWorld() []rune {
+	return w.strategyLetters
+}
+
+// StrategyDescription returns a human-readable (≤64 char) name for
+// `letter`. Returns "" when no description lookup is configured —
+// the UI then renders just the letter without a tail string.
+func (w *World) StrategyDescription(letter rune) string {
+	if w.strategyDescriptionForLetter == nil {
+		return ""
+	}
+	return w.strategyDescriptionForLetter(letter)
+}
+
+// aliveLabels returns the subset of `pool` whose agents are
+// currently alive and enabled. Used by PickTrustee to constrain
+// the candidate pool — a dead or disabled leader can't be followed
+// (their trail decays naturally; the agent should consider a
+// different trustee or fall back).
+func aliveLabels(w *World, pool []rune) []rune {
+	out := make([]rune, 0, len(pool))
+	for _, l := range pool {
+		a := w.AgentByLabel(l)
+		if a != nil && a.Alive && !a.Disabled {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// softmaxPickLabel samples one label from `candidates` weighted by
+// exp(trustScores[label]). All-zero scores yield a uniform pick.
+// Empty candidate slice returns 0.
+func softmaxPickLabel(rng *rand.Rand, candidates []rune, trustScores map[rune]float64) rune {
+	if len(candidates) == 0 {
+		return 0
+	}
+	maxTrust := math.Inf(-1)
+	for _, c := range candidates {
+		if v := trustScores[c]; v > maxTrust {
+			maxTrust = v
+		}
+	}
+	if math.IsInf(maxTrust, -1) {
+		maxTrust = 0
+	}
+	weights := make([]float64, len(candidates))
+	total := 0.0
+	for i, c := range candidates {
+		weights[i] = math.Exp(trustScores[c] - maxTrust)
+		total += weights[i]
+	}
+	if total <= 0 {
+		return candidates[rng.Intn(len(candidates))]
+	}
+	r := rng.Float64() * total
+	acc := 0.0
+	for i, w := range weights {
+		acc += w
+		if r <= acc {
+			return candidates[i]
+		}
+	}
+	return candidates[len(candidates)-1]
+}
+
+// Trust update constants: a journey's outcome rewards (or penalizes)
+// trust in the agent's CurrentTrustee.
+//
+//	Goal reached                  → +TrustGoalBonus
+//	  ... and journey ≤ TTL       → +TrustWithinTTLBonus
+//	Goal NOT reached (any death)  → −TrustFailurePenalty
+//
+// MinTrusteeContactTicks gates BOTH the reward and the penalty:
+// if the agent never sustained contact with the trustee's scent for
+// at least this many ticks during the journey, the outcome carries
+// no information about the trustee (the agent "lost the scent")
+// and endJourney is a no-op.
+const (
+	TrustGoalBonus         = 1.0
+	TrustWithinTTLBonus    = 2.0
+	TrustFailurePenalty    = 1.0
+	MinTrusteeContactTicks = 5
+)
+
+// Strategy-trust constants: per-journey update for the algorithm
+// the agent used.
+//
+//	Reach goal                       → +StrategyGoalBonus
+//	... and faster than prior best   → +StrategyImproveBonus
+//	... and slower than prior best   → +StrategyGoalBonus only
+//	Did not reach goal               → −StrategyFailurePenalty
+const (
+	StrategyGoalBonus      = 1.0
+	StrategyImproveBonus   = 2.0
+	StrategyFailurePenalty = 1.0
+)
+
+// endJourney runs the per-life trust update when a journey ends —
+// either by goal-reach (`success=true`) or by death of any cause
+// (`success=false`). Reads w.Stats.OptimalDistance to compare the
+// agent's TicksAlive against the TTL budget.
+//
+// No-op for:
+//   - non-follower labels (agents 1, 2, 3)
+//   - no CurrentTrustee (e.g. died before PickTrustee fired)
+//   - JourneyTrusteeContactTicks < MinTrusteeContactTicks — the
+//     agent "lost the scent" / never actually followed the trustee,
+//     so the outcome doesn't reflect on them either way (this
+//     avoids unfairly penalizing a trustee whose trail just never
+//     came near this agent on this journey).
+func (w *World) endJourney(a *Agent, success bool) {
+	w.updateStrategyTrust(a, success)
+	if !IsScentFollower(a.Label) || a.CurrentTrustee == 0 {
+		return
+	}
+	if a.JourneyTrusteeContactTicks < MinTrusteeContactTicks {
+		return
+	}
+	if a.TrustScores == nil {
+		a.TrustScores = map[rune]float64{}
+	}
+	if !success {
+		a.TrustScores[a.CurrentTrustee] -= TrustFailurePenalty
+		return
+	}
+	a.TrustScores[a.CurrentTrustee] += TrustGoalBonus
+	optimalTTL := TTLMultiplier * w.Stats.OptimalDistance
+	if optimalTTL > 0 && a.TicksAlive > 0 && a.TicksAlive <= optimalTTL {
+		a.TrustScores[a.CurrentTrustee] += TrustWithinTTLBonus
+	}
+}
+
+// StrategyPerfCounts tabulates per-strategy run-end outcomes for
+// the TUI's Strategy Performance table. Resets to nil on each new
+// world (i.e., per-map, not lifetime).
+//
+//	TTLExpiry: runs that ended in a TTL-expiry death.
+//	NoFollow:  runs that ended (any cause) with no CurrentTrustee.
+//	Following: runs that ended (any cause) WITH a CurrentTrustee.
+//
+// NoFollow + Following == total runs counted for that strategy.
+// TTLExpiry is a subset; it's tallied independently regardless of
+// follow state.
+type StrategyPerfCounts struct {
+	TTLExpiry int
+	NoFollow  int
+	Following int
+}
+
+// recordStrategyDeath bumps Strategy Performance counters when an
+// agent's journey ends in death. Only Die.TTL fires (and only for
+// reason == "ttl") — Win.NoFollow / Win.Following are reserved for
+// successful goal-reaches.
+func (w *World) recordStrategyDeath(a *Agent, ttlExpiry bool) {
+	if a.CurrentStrategy == 0 || !ttlExpiry {
+		return
+	}
+	c := w.ensureStrategyPerf(a.CurrentStrategy)
+	c.TTLExpiry++
+}
+
+// recordStrategyGoal bumps Win.NoFollow or Win.Following depending
+// on the agent's trustee status at goal-reach. Never touches
+// Die.TTL.
+func (w *World) recordStrategyGoal(a *Agent) {
+	if a.CurrentStrategy == 0 {
+		return
+	}
+	c := w.ensureStrategyPerf(a.CurrentStrategy)
+	if a.CurrentTrustee != 0 {
+		c.Following++
+	} else {
+		c.NoFollow++
+	}
+}
+
+// ensureStrategyPerf returns the counter struct for `letter`,
+// allocating it (and the parent map) on demand.
+func (w *World) ensureStrategyPerf(letter rune) *StrategyPerfCounts {
+	if w.StrategyPerf == nil {
+		w.StrategyPerf = map[rune]*StrategyPerfCounts{}
+	}
+	c, ok := w.StrategyPerf[letter]
+	if !ok {
+		c = &StrategyPerfCounts{}
+		w.StrategyPerf[letter] = c
+	}
+	return c
+}
+
+// updateStrategyTrust mutates StrategyTrustScores for the algorithm
+// the agent just used (a.CurrentStrategy). Reward structure:
+//
+//	success && (no prior best || TicksAlive < prior best)
+//	    → +StrategyGoalBonus + StrategyImproveBonus
+//	    + record new best in StrategyBestSolveTime
+//
+//	success && TicksAlive ≥ prior best
+//	    → +StrategyGoalBonus
+//
+//	!success
+//	    → −StrategyFailurePenalty
+//
+// No-op when a.CurrentStrategy == 0 (e.g. agent died before
+// PickStrategy fired, or world has no letter dispatch configured).
+// optimizeKnownPath recomputes a.KnownShortestPath via BFS through
+// a.KnownCells, from w.Maze.EntrancePos to w.Maze.GoalPos. Called
+// from CheckGoal on every goal-reach: the agent has just proved
+// (entrance → goal) is connected within its perceived terrain, so
+// BFS over that subgraph yields the shortest path the agent could
+// have legitimately taken. Each successive call uses a non-smaller
+// KnownCells set, so the cached path monotonically improves (or
+// stays equal) until it equals the true shortest path.
+//
+// Strict-PO safe: only cells in KnownCells are considered.
+//
+// Swarm extension: when `a` is using SwarmStrategyLetter, the
+// optimizer first unions the KnownCells of every alive swarm peer
+// into a's view (so BFS runs over collective perception), then
+// broadcasts the resulting path back to every alive swarm peer's
+// KnownShortestPath. One swarm member's win lifts the whole hive.
+func (w *World) optimizeKnownPath(a *Agent) {
+	if a.CurrentStrategy == SwarmStrategyLetter {
+		if a.KnownCells == nil {
+			a.KnownCells = map[Pos]bool{}
+		}
+		for _, peer := range w.Agents {
+			if peer == a || !peer.Alive || peer.CurrentStrategy != SwarmStrategyLetter {
+				continue
+			}
+			for p := range peer.KnownCells {
+				a.KnownCells[p] = true
+			}
+		}
+	}
+	from := w.Maze.EntrancePos
+	to := w.Maze.GoalPos
+	if a.KnownCells == nil || !a.KnownCells[from] || !a.KnownCells[to] {
+		return
+	}
+	type node struct {
+		pos  Pos
+		prev int
+	}
+	nodes := []node{{from, -1}}
+	seen := map[Pos]int{from: 0}
+	for head := 0; head < len(nodes); head++ {
+		cur := nodes[head]
+		if cur.pos == to {
+			path := make([]Pos, 0, head+1)
+			for i := head; i != -1; i = nodes[i].prev {
+				path = append(path, nodes[i].pos)
+			}
+			// Reverse so path[0] is entrance, path[len-1] is goal.
+			for i, j := 0, len(path)-1; i < j; i, j = i+1, j-1 {
+				path[i], path[j] = path[j], path[i]
+			}
+			a.KnownShortestPath = path
+			// Swarm broadcast: copy the freshly-optimized path
+			// into every alive swarm peer so they can replay it
+			// without having to reach the goal themselves first.
+			// Path is cloned so peer mutation (e.g., partial
+			// replay) doesn't bleed back.
+			if a.CurrentStrategy == SwarmStrategyLetter {
+				for _, peer := range w.Agents {
+					if peer == a || !peer.Alive || peer.CurrentStrategy != SwarmStrategyLetter {
+						continue
+					}
+					peer.KnownShortestPath = append([]Pos(nil), path...)
+				}
+			}
+			return
+		}
+		for _, d := range Cardinals {
+			np := Pos{X: cur.pos.X + d.X, Y: cur.pos.Y + d.Y}
+			if !InBounds(np.X, np.Y) || !a.KnownCells[np] {
+				continue
+			}
+			if !w.Maze.IsWalkable(np) {
+				continue
+			}
+			if _, ok := seen[np]; ok {
+				continue
+			}
+			seen[np] = len(nodes)
+			nodes = append(nodes, node{np, head})
+		}
+	}
+}
+
+// CachedStepFor returns the next cell along a.KnownShortestPath
+// after a.Pos, or (a.Pos, false) when no usable cached step exists:
+//
+//   - path is shorter than 2 cells (no cache yet, or just goal)
+//   - a.Pos isn't on the cached path (the agent has drifted off
+//     and needs native re-planning)
+//   - the next cell is now unwalkable or hazardous (terrain
+//     changed since the path was cached — wumpus moved in, fire
+//     pit spawned, etc.)
+//
+// PO strategies should consult this BEFORE running their own
+// planner so previously-proven-optimal routes get replayed.
+func (w *World) CachedStepFor(a *Agent) (Pos, bool) {
+	if len(a.KnownShortestPath) < 2 {
+		return a.Pos, false
+	}
+	for i, p := range a.KnownShortestPath {
+		if p != a.Pos {
+			continue
+		}
+		if i+1 >= len(a.KnownShortestPath) {
+			return a.Pos, false
+		}
+		next := a.KnownShortestPath[i+1]
+		if !w.Maze.IsWalkable(next) || w.IsHazard(next) {
+			return a.Pos, false
+		}
+		return next, true
+	}
+	return a.Pos, false
+}
+
+func (w *World) updateStrategyTrust(a *Agent, success bool) {
+	if a.CurrentStrategy == 0 {
+		return
+	}
+	if a.StrategyTrustScores == nil {
+		a.StrategyTrustScores = map[rune]float64{}
+	}
+	if !success {
+		a.StrategyTrustScores[a.CurrentStrategy] -= StrategyFailurePenalty
+		return
+	}
+	if a.StrategyBestSolveTime == nil {
+		a.StrategyBestSolveTime = map[rune]int{}
+	}
+	prior, hadPrior := a.StrategyBestSolveTime[a.CurrentStrategy]
+	a.StrategyTrustScores[a.CurrentStrategy] += StrategyGoalBonus
+	if !hadPrior || a.TicksAlive < prior {
+		a.StrategyTrustScores[a.CurrentStrategy] += StrategyImproveBonus
+		a.StrategyBestSolveTime[a.CurrentStrategy] = a.TicksAlive
+	}
+}
+
+// ScentMaxAge bounds how many cycles a deposited scent remains
+// perceptible. ScentFreshness decays linearly from 1.0 at deposit
+// time to 0.0 at this age. 1000 cycles ≈ 100 seconds of game time
+// at the 100ms tick rate — long enough for followers to pick up a
+// trail from across the maze, but still short enough that very
+// old paths don't permanently bias routing.
+const ScentMaxAge = 1000
+
+// ScentFreshness returns the local scent intensity at (x, y) in
+// [0.0, 1.0]. 1.0 means a fresh deposit this very cycle; the value
+// decays linearly to 0.0 over ScentMaxAge cycles. Returns 0 for
+// cells that have never been scented or where the deposit has
+// fully aged out.
+func (w *World) ScentFreshness(x, y int) float64 {
+	if !InBounds(x, y) {
+		return 0
+	}
+	deposited := w.ScentCycle[y][x]
+	if deposited <= 0 {
+		return 0
+	}
+	age := w.Cycle - deposited
+	if age >= ScentMaxAge {
+		return 0
+	}
+	if age < 0 {
+		age = 0
+	}
+	return 1.0 - float64(age)/float64(ScentMaxAge)
+}
+
+// MarkAgentSensed extends a.KnownCells with every cell the agent
+// can perceive this tick. Range is a wall-respecting BFS up to
+// a.SensingRadius cardinal steps:
+//
+//   - SensingRadius ≤ 1 (default): the agent's cell + its 4 cardinal
+//     neighbors (the legacy "flashlight" range).
+//   - SensingRadius = 2 (far-sight agents 8/9/A/B/C): every cell
+//     reachable in ≤2 cardinal steps without crossing a wall.
+//
+// Walls themselves ARE added to KnownCells (the agent learns where
+// walls are) but they block further propagation — agents can't see
+// past walls. Called by MoveAgents (post-move) and RespawnAgents
+// (post-spawn).
+func (w *World) MarkAgentSensed(a *Agent) {
+	if a.KnownCells == nil {
+		a.KnownCells = map[Pos]bool{}
+	}
+	radius := a.SensingRadius
+	if radius < 1 {
+		radius = 1
+	}
+	a.KnownCells[a.Pos] = true
+	type node struct {
+		p     Pos
+		depth int
+	}
+	visited := map[Pos]bool{a.Pos: true}
+	queue := []node{{a.Pos, 0}}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur.depth >= radius {
+			continue
+		}
+		for _, d := range Cardinals {
+			np := Pos{X: cur.p.X + d.X, Y: cur.p.Y + d.Y}
+			if !InBounds(np.X, np.Y) || visited[np] {
+				continue
+			}
+			visited[np] = true
+			a.KnownCells[np] = true
+			// Walls are perceived (added to KnownCells) but block
+			// further BFS expansion — you can't see past a wall.
+			if w.Maze.Cells[np.Y][np.X] == CellWall {
+				continue
+			}
+			queue = append(queue, node{np, cur.depth + 1})
+		}
+	}
+}
+
 // HeatAt is the canonical sensor read for fire-pit proximity. Returns
 // false whenever FirePitsDisabled is set, so agent perception, belief
 // updates, and DQN features all see a "clean" board when fire pits
@@ -1557,7 +2871,68 @@ func (w *World) AgentByLabel(label rune) *Agent {
 }
 
 // Cardinals: 4 cardinal directions.
-var Cardinals = []Pos{{0, -1}, {0, 1}, {-1, 0}, {1, 0}}
+// Cardinals enumerates every movement / sensing direction. Despite
+// the historic name, this is now the Moore neighborhood (8 dirs):
+// 4 cardinals followed by 4 diagonals. Movement and pathfinding
+// treat the 4 cardinals as cost CardinalStepCost (10) and the 4
+// diagonals as cost DiagonalStepCost (14 ≈ 10·√2) — Dijkstra is
+// the pathfinder of record. Diagonal moves additionally honor the
+// corner-clipping rule (see CanMoveTo / IsCornerClipped) so an
+// agent can't squeeze through a one-cell wall gap.
+var Cardinals = []Pos{
+	{0, -1},           // N
+	{0, 1},            // S
+	{-1, 0},           // W
+	{1, 0},            // E
+	{-1, -1}, {1, -1}, // NW, NE
+	{-1, 1}, {1, 1}, // SW, SE
+}
+
+// CardinalCount is the number of strict-cardinal (4-conn) entries
+// at the head of Cardinals. Code that needs strict cardinal-only
+// neighbors (e.g., recursive-backtracker maze carving with 2-step
+// jumps) can iterate Cardinals[:CardinalCount].
+const CardinalCount = 4
+
+// StepCost returns the path-cost weight for moving by direction d:
+// 10 for a cardinal step (axis-aligned), 14 for a diagonal step
+// (≈ 10·√2). All Dijkstra-based pathfinding uses these weights.
+const (
+	CardinalStepCost = 10
+	DiagonalStepCost = 14
+)
+
+// StepCost reports the Dijkstra-weight for a single move whose
+// displacement is d (must be a unit-1 cardinal or diagonal offset).
+func StepCost(d Pos) int {
+	if d.X != 0 && d.Y != 0 {
+		return DiagonalStepCost
+	}
+	return CardinalStepCost
+}
+
+// IsDiagonal reports whether a direction offset is one of the 4
+// diagonal Moore offsets (both |dx|=1 and |dy|=1).
+func IsDiagonal(d Pos) bool {
+	return d.X != 0 && d.Y != 0
+}
+
+// IsCornerClipped reports whether moving from `from` to `to` would
+// squeeze through a wall corner. Only meaningful for diagonal
+// steps: a NE move from (x,y) to (x+1,y-1) is corner-clipped iff
+// either (x+1,y) or (x,y-1) is unwalkable. Walls are solid: the
+// agent can't dart between them through a one-cell diagonal gap.
+func (m *Maze) IsCornerClipped(from, to Pos) bool {
+	dx := to.X - from.X
+	dy := to.Y - from.Y
+	if dx == 0 || dy == 0 {
+		return false
+	}
+	// Two orthogonal cells the diagonal sweeps between.
+	side1 := Pos{X: from.X + dx, Y: from.Y}
+	side2 := Pos{X: from.X, Y: from.Y + dy}
+	return !m.IsWalkable(side1) || !m.IsWalkable(side2)
+}
 
 // InBounds reports whether (x, y) is inside the board.
 func InBounds(x, y int) bool {

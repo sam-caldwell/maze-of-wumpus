@@ -88,7 +88,7 @@ func TestRunHeadlessLoop_GameOverShortCircuit(t *testing.T) {
 	w := world.NewWorld(11)
 	w.GameOver = true
 	var buf bytes.Buffer
-	runHeadlessLoop(w, 100, &buf, nil)
+	runHeadlessLoop(w, 100, &buf)
 	got := strings.Count(buf.String(), "cycle=")
 	if got > 5 {
 		t.Errorf("expected early exit, got %d state lines", got)
@@ -126,13 +126,9 @@ func TestProductionRunProgram_WithStubbedTea(t *testing.T) {
 		if m.World == nil {
 			t.Error("model has no world")
 		}
-		if m.Logger == nil {
-			t.Error("model has no logger")
-		}
 		return nil
 	}
 	defer func() { teaRunner = prev }()
-	// Use a temp working directory so build/logs/ goes there.
 	tmp := t.TempDir()
 	cwd, _ := os.Getwd()
 	defer os.Chdir(cwd)
