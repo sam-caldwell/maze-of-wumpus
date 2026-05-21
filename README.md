@@ -1,5 +1,9 @@
 # maze-of-wumpus
 
+<p align="center">
+  <img src="docs/img/logo.png" alt="Maze of Wumpus logo" width="320">
+</p>
+
 A terminal-UI maze game written in Go that pits **twelve labeled agents** running a **per-journey rotation of
 seven decision algorithms** against a procedurally-generated 120 × 80 maze under strict partial observability.
 Strategies include omniscient BFS, a swarm-of-Bayesians that shares perceived terrain, classic Wumpus-World
