@@ -5,16 +5,21 @@
 //
 //	1  bfs                  — omniscient BFS benchmark
 //	2  dfs                  — omniscient DFS
-//	3  bayesian             — Wumpus-World Bayesian, strict PO, NO scent (radius 1)
-//	4  scent-follower       — Bayesian + scent (radius 1)
-//	5  dqn                  — deep Q-network with scent perception (radius 1)
-//	6  pomcp                — flat Monte-Carlo planner with scent (radius 1)
-//	7  qmdp                 — POMDP QMDP-style planner with scent (radius 1)
-//	8  bayesian (far-sight)       — same as 3 with SensingRadius=2
-//	9  scent-follower (far-sight) — same as 4 with SensingRadius=2
-//	A  dqn (far-sight)            — same as 5 with SensingRadius=2
-//	B  pomcp (far-sight)          — same as 6 with SensingRadius=2
-//	C  qmdp (far-sight)           — same as 7 with SensingRadius=2
+//	3  bayesian             — Wumpus-World Bayesian, strict PO, NO scent
+//	4  scent-follower       — Bayesian + scent
+//	5  dqn                  — deep Q-network with scent perception
+//	6  pomcp                — flat Monte-Carlo planner with scent
+//	7  qmdp                 — POMDP QMDP-style planner with scent
+//	8  bayesian             — duplicate of 3 (was a "far-sight" variant
+//	9  scent-follower       — duplicate of 4   pre the uniform-perception
+//	A  dqn                  — duplicate of 5   refactor; kept to preserve
+//	B  pomcp                — duplicate of 6   the 12-agent roster size)
+//	C  qmdp                 — duplicate of 7
+//
+// All twelve agents share the same world.DefaultSmellRadius (2) and
+// world.DefaultSightRadius (10). The "far-sight" perception advantage
+// 8/9/A/B/C used to carry is gone — every agent now sees out to 10
+// cells and smells out to 2.
 package strategy
 
 import (
@@ -128,7 +133,8 @@ func NameByLetter(letter rune) string {
 // ForLabel returns the strategy assigned to the given agent label,
 // or nil if the label is unrecognised. The far-sight variants
 // share their counterpart's strategy function — the only difference
-// is Agent.SensingRadius (set at construction).
+// shares the same decision function; the agents' perception is
+// uniform across the roster (see world.DefaultSightRadius).
 func ForLabel(label rune) world.Strategy {
 	switch label {
 	case '1':

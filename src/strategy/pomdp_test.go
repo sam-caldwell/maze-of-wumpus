@@ -18,9 +18,13 @@ func TestScentFollower_PrefersFreshLeaderTrail(t *testing.T) {
 	w.AgentAt[a.Pos.Y][a.Pos.X] = nil
 	a.Pos = world.Pos{X: 40, Y: 40}
 	w.AgentAt[40][40] = a
-	w.Maze.Cells[40][40] = world.CellPath
-	for _, d := range world.Cardinals {
-		w.Maze.Cells[40+d.Y][40+d.X] = world.CellPath
+	// Carve a 3×3 open block so the per-agent prune (leaf-trim +
+	// articulation) keeps every cardinal neighbor alive. A bare +
+	// shape would have every arm trimmed as a degree-1 leaf.
+	for y := 39; y <= 41; y++ {
+		for x := 39; x <= 41; x++ {
+			w.Maze.Cells[y][x] = world.CellPath
+		}
 	}
 	w.MarkAgentSensed(a)
 	// Plant scent: east neighbor is a STALE deposit from agent 1
@@ -48,9 +52,11 @@ func TestScentFollower_IgnoresNonLeaderScent(t *testing.T) {
 	w.AgentAt[a.Pos.Y][a.Pos.X] = nil
 	a.Pos = world.Pos{X: 40, Y: 40}
 	w.AgentAt[40][40] = a
-	w.Maze.Cells[40][40] = world.CellPath
-	for _, d := range world.Cardinals {
-		w.Maze.Cells[40+d.Y][40+d.X] = world.CellPath
+	// 3×3 open block (same reason as the test above).
+	for y := 39; y <= 41; y++ {
+		for x := 39; x <= 41; x++ {
+			w.Maze.Cells[y][x] = world.CellPath
+		}
 	}
 	w.MarkAgentSensed(a)
 	w.Cycle = 10

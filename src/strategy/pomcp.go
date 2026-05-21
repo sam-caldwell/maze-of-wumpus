@@ -55,7 +55,21 @@ const (
 // goroutine gets its own *rand.Rand seeded deterministically from
 // World.Rng so concurrent runs don't race on the shared RNG yet
 // the same world seed still yields a fixed output mapping.
+//
+// Before any candidates are considered, a per-agent graph prune is
+// applied to a.KnownCells so rollouts can't wander into perceived
+// dead-end chains. wg.Wait() blocks the call until every rollout
+// goroutine has finished, so the deferred restore can't race with
+// in-flight reads of a.KnownCells.
 func POMCPStrategy(w *world.World, a *world.Agent) world.Pos {
+	restore := applyAgentPrunedView(w, a)
+	defer restore()
+	return pomcpStrategyPlan(w, a)
+}
+
+// pomcpStrategyPlan is the inner planning core. Assumes a.KnownCells
+// has been set to whatever view the caller wants the rollouts to see.
+func pomcpStrategyPlan(w *world.World, a *world.Agent) world.Pos {
 	if step, ok := w.CachedStepFor(a); ok {
 		return step
 	}

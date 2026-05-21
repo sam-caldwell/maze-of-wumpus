@@ -351,6 +351,113 @@ func TestRenderTrustMatrix_EventsTable_ScrollsNewestAtBottom(t *testing.T) {
 	}
 }
 
+// TestTrustCell_Diagonal: the self-diagonal must render as the dim
+// '·' glyph regardless of score/present arguments.
+func TestTrustCell_Diagonal(t *testing.T) {
+	got := trustCell(0, false, true)
+	want := "\x1b[38;5;240m·\x1b[0m"
+	if got != want {
+		t.Errorf("trustCell(_,_,diag) = %q, want %q", got, want)
+	}
+	// Score+present shouldn't affect diagonal output.
+	if trustCell(10, true, true) != want {
+		t.Error("diagonal output should be invariant to score/present")
+	}
+}
+
+// TestTrustCell_Empty: non-diagonal cells with no recorded score
+// must render as the bright-white '-' placeholder.
+func TestTrustCell_Empty(t *testing.T) {
+	got := trustCell(0, false, false)
+	want := "\x1b[38;5;255m-\x1b[0m"
+	if got != want {
+		t.Errorf("trustCell(0,false,false) = %q, want %q", got, want)
+	}
+}
+
+// TestTrustCell_HeatPalette: each in-range heat index must produce
+// the exact precomputed colored '█' string. Locks in byte-for-byte
+// equivalence with the old fmt.Sprintf implementation.
+func TestTrustCell_HeatPalette(t *testing.T) {
+	for idx, fg := range trustHeatFG {
+		// Pick a score that maps to exactly this idx.
+		var score float64
+		if idx == 15 {
+			score = TrustHeatCap + 1 // saturates
+		} else if idx == 0 {
+			score = 0.0001 // > 0 so present-branch fires, idx=0
+		} else {
+			// idx = score / TrustHeatCap * 15 → score = idx * TrustHeatCap / 15
+			score = float64(idx) * TrustHeatCap / 15
+		}
+		got := trustCell(score, true, false)
+		want := fmt.Sprintf("\x1b[38;5;%dm█\x1b[0m", fg)
+		if got != want {
+			t.Errorf("trustCell(idx=%d) = %q, want %q", idx, got, want)
+		}
+	}
+}
+
+// TestLegendCell_Range: every legend index 0..15 returns the expected
+// "█ <2-digit idx>" string for the matching heat color.
+func TestLegendCell_Range(t *testing.T) {
+	for idx, fg := range trustHeatFG {
+		got := legendCell(idx)
+		want := fmt.Sprintf("\x1b[38;5;%dm█\x1b[0m %2d", fg, idx)
+		if got != want {
+			t.Errorf("legendCell(%d) = %q, want %q", idx, got, want)
+		}
+	}
+}
+
+// TestStrategyPerfCell_ByteEquivalence: across a range of values and
+// widths the refactored helper must produce byte-identical output to
+// the prior fmt.Sprintf implementation.
+func TestStrategyPerfCell_ByteEquivalence(t *testing.T) {
+	cases := []struct {
+		value, width, max int
+	}{
+		{0, 5, 0},   // max=0 → idx=0
+		{0, 5, 10},  // value=0 → idx=0
+		{10, 5, 10}, // value=max → idx=15
+		{5, 7, 10},  // mid
+		{3, 12, 7},  // wide column
+		{99, 3, 99}, // padding == 0
+	}
+	for _, c := range cases {
+		idx := 0
+		if c.max > 0 {
+			idx = c.value * 15 / c.max
+			if idx > 15 {
+				idx = 15
+			} else if idx < 0 {
+				idx = 0
+			}
+		}
+		want := fmt.Sprintf("\x1b[48;5;%dm\x1b[38;5;255m%*d\x1b[0m",
+			strategyPerfHeatBG[idx], c.width, c.value)
+		got := strategyPerfCell(c.value, c.width, c.max)
+		if got != want {
+			t.Errorf("strategyPerfCell(%d,%d,%d) = %q, want %q",
+				c.value, c.width, c.max, got, want)
+		}
+	}
+}
+
+// TestStrategyPerfCell_PaddingClampsAtZero: when value's printed
+// width >= column width, the cell must contain no leading spaces
+// (i.e., no negative-padding crash, no double-padding).
+func TestStrategyPerfCell_PaddingClampsAtZero(t *testing.T) {
+	got := strategyPerfCell(12345, 3, 12345) // value wider than width
+	// No leading spaces inside the colored region.
+	if strings.Contains(got, "  12345") {
+		t.Errorf("strategyPerfCell over-padded: %q", got)
+	}
+	if !strings.Contains(got, "12345") {
+		t.Errorf("strategyPerfCell missing value: %q", got)
+	}
+}
+
 // TestRenderTrustMatrix_AlgorithmLegendTruncates64: descriptions
 // longer than 64 chars are truncated so the column stays within
 // terminal-friendly width.

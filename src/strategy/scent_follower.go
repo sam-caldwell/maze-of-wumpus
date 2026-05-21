@@ -20,20 +20,34 @@ import (
 // ScentFollowerStrategy is agent 6's strict-PO decision rule.
 //
 // Each call:
-//  1. Use a.CurrentTrustee — the attract label picked once per map
+//  1. Apply the per-agent graph prune to a.KnownCells so cardinal
+//     neighbors leading into perceived dead-end chains drop out.
+//     This means a strong scent emanating from a dead-end branch
+//     no longer lures the agent into it — the dead-end cells are
+//     no longer "walkable" from the planner's view.
+//  2. Use a.CurrentTrustee — the attract label picked once per map
 //     (uniform on the first map, weighted by TrustScores on later
 //     maps). This is the agent's "who do I follow this map?" answer.
-//  2. Score every walkable known cardinal neighbor:
+//  3. Score every walkable known cardinal neighbor:
 //     trustee scent       → +safety × freshness
 //     repel-scent         → −safety × freshness
 //     negative-trust scent → −safety × freshness (dynamic repel)
 //     anything else        → 0
-//  3. Return argmax; fall back to outward bias (highest
+//  4. Return argmax; fall back to outward bias (highest
 //     DistFromStart) when nothing scored above zero.
 //
 // Strict PO: only senses scent at cells in `a.KnownCells`. Never
 // references `w.Maze.GoalPos`.
 func ScentFollowerStrategy(w *world.World, a *world.Agent) world.Pos {
+	restore := applyAgentPrunedView(w, a)
+	defer restore()
+	return scentFollowerStrategyPlan(w, a)
+}
+
+// scentFollowerStrategyPlan is the inner decision rule. Assumes
+// a.KnownCells has been set to the view the caller wants the
+// planner to see (raw or solo-pruned).
+func scentFollowerStrategyPlan(w *world.World, a *world.Agent) world.Pos {
 	if step, ok := w.CachedStepFor(a); ok {
 		return step
 	}

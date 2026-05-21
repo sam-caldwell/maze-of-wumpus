@@ -238,82 +238,146 @@ func TestIsScentFollower(t *testing.T) {
 	}
 }
 
-// TestFarSightAgents_HaveRadius2: agents 8/9/A/B/C are constructed
-// with SensingRadius=2; short-sight agents stay at the default.
-func TestFarSightAgents_HaveRadius2(t *testing.T) {
+// TestAgentPerceptionDefaults: every agent is constructed with the
+// uniform default smell/sight radii. The old far-sight distinction
+// is gone — labels 8/9/A/B/C are perception-equivalent to 1-7.
+func TestAgentPerceptionDefaults(t *testing.T) {
 	w := NewWorld(310)
-	for _, l := range []rune{'8', '9', 'A', 'B', 'C'} {
+	for _, l := range []rune{'1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C'} {
 		a := w.AgentByLabel(l)
 		if a == nil {
 			t.Fatalf("missing agent %c", l)
 		}
-		if a.SensingRadius != 2 {
-			t.Errorf("agent %c SensingRadius=%d, want 2", l, a.SensingRadius)
+		if a.SmellRadius != DefaultSmellRadius {
+			t.Errorf("agent %c SmellRadius=%d, want %d",
+				l, a.SmellRadius, DefaultSmellRadius)
 		}
-	}
-	for _, l := range []rune{'1', '2', '3', '4', '5', '6', '7'} {
-		a := w.AgentByLabel(l)
-		if a != nil && a.SensingRadius > 1 {
-			t.Errorf("short-sight agent %c SensingRadius=%d, want ≤1",
-				l, a.SensingRadius)
+		if a.SightRadius != DefaultSightRadius {
+			t.Errorf("agent %c SightRadius=%d, want %d",
+				l, a.SightRadius, DefaultSightRadius)
 		}
 	}
 }
 
-// TestMarkAgentSensed_Radius1: with 8-conn Cardinals, radius=1 BFS
-// covers the agent's cell + 8 Moore neighbors = 9 cells in an
-// open area.
-func TestMarkAgentSensed_Radius1(t *testing.T) {
+// TestMarkAgentSensed_SightRadius1: with SightRadius=1, the BFS
+// covers the agent's cell + 8 Moore neighbors (3×3). The wall-
+// adjacency post-pass then extends each path cell's Moore
+// neighbors, growing the perceived set to 5×5 = 25 cells in fully-
+// open terrain.
+func TestMarkAgentSensed_SightRadius1(t *testing.T) {
 	w := NewWorld(311)
 	for y := 38; y <= 42; y++ {
 		for x := 38; x <= 42; x++ {
 			w.Maze.Cells[y][x] = CellPath
 		}
 	}
-	a := &Agent{Label: '4', Pos: Pos{X: 40, Y: 40}, SensingRadius: 1}
+	a := &Agent{Label: '4', Pos: Pos{X: 40, Y: 40}, SightRadius: 1}
 	w.MarkAgentSensed(a)
-	if got := len(a.KnownCells); got != 9 {
-		t.Errorf("radius=1 KnownCells = %d, want 9 (3x3 Moore)", got)
+	// 3×3 BFS + post-pass extends to 5×5.
+	if got := len(a.KnownCells); got != 25 {
+		t.Errorf("SightRadius=1 + adjacency = %d, want 25 (5×5 after wall-adjacency)", got)
 	}
 }
 
-// TestMarkAgentSensed_Radius2OpenArea: radius=2 BFS in an open
-// 5×5 plaza covers all 25 cells (5x5 Moore square).
-func TestMarkAgentSensed_Radius2OpenArea(t *testing.T) {
+// TestMarkAgentSensed_SightRadius2OpenArea: SightRadius=2 BFS covers
+// 5×5; the wall-adjacency post-pass extends to 7×7 = 49 cells.
+func TestMarkAgentSensed_SightRadius2OpenArea(t *testing.T) {
 	w := NewWorld(312)
 	for y := 38; y <= 42; y++ {
 		for x := 38; x <= 42; x++ {
 			w.Maze.Cells[y][x] = CellPath
 		}
 	}
-	a := &Agent{Label: '9', Pos: Pos{X: 40, Y: 40}, SensingRadius: 2}
+	a := &Agent{Label: '9', Pos: Pos{X: 40, Y: 40}, SightRadius: 2}
 	w.MarkAgentSensed(a)
-	if got := len(a.KnownCells); got != 25 {
-		t.Errorf("radius=2 open KnownCells = %d, want 25 (5x5 Moore)", got)
+	if got := len(a.KnownCells); got != 49 {
+		t.Errorf("SightRadius=2 + adjacency = %d, want 49 (7×7)", got)
 	}
 }
 
-// TestMarkAgentSensed_Radius2WallBlocks: walls enter KnownCells
-// but block propagation past them. With 8-conn sensing the agent
-// can sometimes reach a cell via a diagonal route, so the test
-// uses a wall + corner-clip combination to fully isolate a cell.
-func TestMarkAgentSensed_Radius2WallBlocks(t *testing.T) {
+// TestMarkAgentSensed_DefaultRadius_FillsWalledRegion: with the
+// production default SightRadius=100, the radius exceeds the board
+// diagonal, so perception is bounded by wall reachability — not by
+// the radius. A 30×30 path block surrounded by a hard wall ring
+// should be fully perceived from a single tick at center, and
+// nothing outside the wall ring should be perceived.
+func TestMarkAgentSensed_DefaultRadius_FillsWalledRegion(t *testing.T) {
+	w := NewWorld(314)
+	// Wall ring at (35..66) × (35..66); 30×30 open interior at
+	// (36..65) × (36..65). Wall everything in between path cells
+	// so the BFS can't escape via the surrounding generated maze.
+	for y := 35; y <= 66; y++ {
+		for x := 35; x <= 66; x++ {
+			if y == 35 || y == 66 || x == 35 || x == 66 {
+				w.Maze.Cells[y][x] = CellWall
+			} else {
+				w.Maze.Cells[y][x] = CellPath
+			}
+		}
+	}
+	a := &Agent{Label: '3', Pos: Pos{X: 50, Y: 50}, SightRadius: DefaultSightRadius}
+	w.MarkAgentSensed(a)
+	// Every cell in the 32×32 (interior + wall ring) must be known:
+	//   30×30 = 900 paths + (32×32 − 30×30) = 124 walls = 1024 cells
+	want := 32 * 32
+	if got := len(a.KnownCells); got != want {
+		t.Errorf("walled region: KnownCells = %d, want %d", got, want)
+	}
+	// Nothing OUTSIDE the wall ring should be perceived (boundary
+	// rule only marks Moore-neighbors of perceived path cells; the
+	// wall ring cells aren't path cells, so they don't extend).
+	outsidePos := Pos{X: 34, Y: 34}
+	if a.KnownCells[outsidePos] {
+		t.Errorf("cell %v outside wall ring should NOT be perceived", outsidePos)
+	}
+}
+
+// TestMarkAgentSensed_WallAdjacency_PerceivesCellsAroundCorners: a
+// perceived path cell adjacent to a wall must have that wall in
+// KnownCells. Lets the agent recognize dead-ends and corners from
+// the perceived terrain layout.
+func TestMarkAgentSensed_WallAdjacency_PerceivesCellsAroundCorners(t *testing.T) {
+	w := NewWorld(315)
+	// Carve a single path cell at (50, 50) surrounded by walls.
+	w.Maze.Cells[50][50] = CellPath
+	for dy := -1; dy <= 1; dy++ {
+		for dx := -1; dx <= 1; dx++ {
+			if dx == 0 && dy == 0 {
+				continue
+			}
+			w.Maze.Cells[50+dy][50+dx] = CellWall
+		}
+	}
+	a := &Agent{Label: '3', Pos: Pos{X: 50, Y: 50}, SightRadius: 1}
+	w.MarkAgentSensed(a)
+	// The agent should perceive its own cell + all 8 wall neighbors,
+	// so it can recognize "I'm at a dead-end / 0-arm cell."
+	for dy := -1; dy <= 1; dy++ {
+		for dx := -1; dx <= 1; dx++ {
+			p := Pos{X: 50 + dx, Y: 50 + dy}
+			if !a.KnownCells[p] {
+				t.Errorf("expected wall-adjacency to mark %v as known", p)
+			}
+		}
+	}
+}
+
+// TestMarkAgentSensed_SightWallBlocks: walls enter KnownCells but
+// block propagation past them. With 8-conn sensing the agent can
+// sometimes reach a cell via a diagonal route, so the test isolates
+// a target cell with a wall column.
+func TestMarkAgentSensed_SightWallBlocks(t *testing.T) {
 	w := NewWorld(313)
 	for y := 38; y <= 42; y++ {
 		for x := 38; x <= 42; x++ {
 			w.Maze.Cells[y][x] = CellPath
 		}
 	}
-	// Box off (42, 40) entirely with walls except no remaining
-	// path within range. The full column at x=41 plus the
-	// diagonal corners ensures the cell at (42, 40) cannot be
-	// reached from (40, 40) within 2 cardinal steps through
-	// walkable cells.
 	for y := 38; y <= 42; y++ {
 		w.Maze.Cells[y][41] = CellWall
 	}
 	wall := Pos{X: 41, Y: 40}
-	a := &Agent{Label: '9', Pos: Pos{X: 40, Y: 40}, SensingRadius: 2}
+	a := &Agent{Label: '9', Pos: Pos{X: 40, Y: 40}, SightRadius: 2}
 	w.MarkAgentSensed(a)
 	if !a.KnownCells[wall] {
 		t.Error("wall should be in KnownCells (perceived but blocking)")
@@ -374,10 +438,27 @@ func TestScentSensedCells_Radius1Moore(t *testing.T) {
 			w.Maze.Cells[y][x] = CellPath
 		}
 	}
-	a := &Agent{Label: '4', Pos: Pos{X: 40, Y: 40}, SensingRadius: 1}
+	a := &Agent{Label: '4', Pos: Pos{X: 40, Y: 40}, SmellRadius: 1}
 	got := w.ScentSensedCells(a)
 	if len(got) != 9 {
-		t.Errorf("radius-1 sensed = %d cells, want 9 (3×3)", len(got))
+		t.Errorf("SmellRadius=1 sensed = %d cells, want 9 (3×3)", len(got))
+	}
+}
+
+// TestScentSensedCells_DefaultRadius: with the production default
+// SmellRadius=2, the sensed set is a 5×5 Moore box (25 cells) in
+// open terrain.
+func TestScentSensedCells_DefaultRadius(t *testing.T) {
+	w := NewWorld(332)
+	for y := 38; y <= 42; y++ {
+		for x := 38; x <= 42; x++ {
+			w.Maze.Cells[y][x] = CellPath
+		}
+	}
+	a := &Agent{Label: '4', Pos: Pos{X: 40, Y: 40}, SmellRadius: DefaultSmellRadius}
+	got := w.ScentSensedCells(a)
+	if len(got) != 25 {
+		t.Errorf("DefaultSmellRadius=2 sensed = %d cells, want 25 (5×5)", len(got))
 	}
 	// Diagonals included.
 	if !got[Pos{X: 39, Y: 39}] {
@@ -397,7 +478,7 @@ func TestScentSensedCells_Radius2WallBlocks(t *testing.T) {
 	}
 	// Vertical wall directly east of agent at (41, 40).
 	w.Maze.Cells[40][41] = CellWall
-	a := &Agent{Label: '9', Pos: Pos{X: 40, Y: 40}, SensingRadius: 2}
+	a := &Agent{Label: '9', Pos: Pos{X: 40, Y: 40}, SmellRadius: 2}
 	got := w.ScentSensedCells(a)
 	if got[Pos{X: 41, Y: 40}] {
 		t.Error("wall cell should NOT be in scent sensed set")
@@ -407,7 +488,7 @@ func TestScentSensedCells_Radius2WallBlocks(t *testing.T) {
 	// cell exactly east-then-east with no diagonal route, e.g. if
 	// surrounded by walls, would be blocked. Spot-check the wall
 	// IS perceived by sight but not by scent:
-	a2 := &Agent{Label: '9', Pos: Pos{X: 40, Y: 40}, SensingRadius: 2}
+	a2 := &Agent{Label: '9', Pos: Pos{X: 40, Y: 40}, SightRadius: 2}
 	w.MarkAgentSensed(a2)
 	if !a2.KnownCells[Pos{X: 41, Y: 40}] {
 		t.Error("wall should be in sight KnownCells")

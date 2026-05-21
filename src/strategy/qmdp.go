@@ -49,10 +49,25 @@ const (
 // argmax over the 4 cardinal actions, using AgentBeliefs for hazard
 // uncertainty and scent perception for trustee guidance.
 //
+// Applies the per-agent graph prune to a.KnownCells before scoring.
+// QMDP is a one-step argmax — it doesn't multi-step plan — so the
+// prune's direct effect is small (cardinal neighbors that lead into
+// perceived dead-end corridors are no longer considered "walkable"
+// from the agent's view, preventing the agent from stepping into
+// perceived cul-de-sacs).
+//
 // Strict PO: only senses cells in a.KnownCells. Never reads
 // w.Maze.GoalPos. Falls back to outward-bias exploration when no
 // candidate scores positively.
 func QMDPStrategy(w *world.World, a *world.Agent) world.Pos {
+	restore := applyAgentPrunedView(w, a)
+	defer restore()
+	return qmdpStrategyPlan(w, a)
+}
+
+// qmdpStrategyPlan is the inner policy. Assumes a.KnownCells has
+// been set to the view the caller wants scored.
+func qmdpStrategyPlan(w *world.World, a *world.Agent) world.Pos {
 	if step, ok := w.CachedStepFor(a); ok {
 		return step
 	}

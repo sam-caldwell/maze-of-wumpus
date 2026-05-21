@@ -23,6 +23,8 @@
 // agent ignores rooms and corridors that lead nowhere.
 package world
 
+import "container/heap"
+
 // swarmGraphState caches the most recent pruned-alive set so we
 // don't recompute every tick. Stored on World; updated lazily when
 // the swarm union grows.
@@ -56,6 +58,43 @@ func (w *World) SwarmAliveCell(p Pos) bool {
 	return w.swarmGraph.aliveCells[p]
 }
 
+// RecomputeAgentPrunedViewIfStale rebuilds the per-agent pruned view
+// of a.KnownCells when the agent has perceived new cells since the
+// last run. Cheap dirty-check: KnownCells is monotonic within a map
+// life, so a size bump is the only signal needed.
+//
+// Solo prune runs Phase 1 only (leaf-trim) — phase 2 articulation
+// pruning is too aggressive for a single agent's sparse anchor set,
+// dropping side branches that the agent legitimately wants to
+// explore (scent gradients, water pits).
+//
+// Extra anchors:
+//   - a.Pos (so the planner can plan FROM the agent's current cell)
+//   - Every perceived water pit (so the water override's PO BFS can
+//     still reach it; without this, a known water pit at the end of
+//     a degree-1 corridor would be leaf-trimmed and become invisible
+//     to NearestKnownWaterPit / bfsTowardKnown).
+//
+// Result lands on a.PrunedKnownCells — a set of cells the agent's
+// solo planner should treat as the effective walkable space. The
+// pruner uses agent perception only (no shared knowledge), and the
+// goal anchor is gated on a.KnownCells[GoalPos] — strict PO is
+// preserved.
+func (w *World) RecomputeAgentPrunedViewIfStale(a *Agent) {
+	cur := len(a.KnownCells)
+	if a.PrunedKnownCells != nil && cur == a.prunedKnownSize {
+		return
+	}
+	extra := []Pos{a.Pos}
+	for _, p := range w.Maze.WaterPits {
+		if a.KnownCells[p] {
+			extra = append(extra, p)
+		}
+	}
+	a.PrunedKnownCells = w.pruneGraph(a.KnownCells, extra, false)
+	a.prunedKnownSize = cur
+}
+
 // unionSwarmKnownCells gathers every cell perceived by any alive
 // agent currently using SwarmStrategyLetter. Walls included (they
 // were perceived but block onward routing) because the planner
@@ -73,13 +112,52 @@ func (w *World) unionSwarmKnownCells() map[Pos]bool {
 	return out
 }
 
-// pruneSwarmGraph runs the two-phase pruner on swarmKnown and
-// returns the alive set (cells the planner should treat as
-// walkable). The input swarmKnown stays untouched.
+// pruneSwarmGraph runs both phases of the pruner on the union of
+// every swarm member's KnownCells. The swarm members' current
+// positions are added as anchors so an agent currently standing in
+// a dead-end can still plan its way out. Returns the alive set
+// (cells the planner should treat as walkable). The input
+// swarmKnown stays untouched.
 func (w *World) pruneSwarmGraph(swarmKnown map[Pos]bool) map[Pos]bool {
-	// Walkable subset of the swarm's perception.
+	var memberPos []Pos
+	for _, peer := range w.Agents {
+		if peer.Alive && peer.CurrentStrategy == SwarmStrategyLetter {
+			memberPos = append(memberPos, peer.Pos)
+		}
+	}
+	return w.pruneGraph(swarmKnown, memberPos, true)
+}
+
+// pruneGraph is the core pruner used by both the swarm graph and
+// the per-agent solo prune:
+//
+//  Phase 1: leaf-trim cells with ≤ 1 alive walkable neighbor that
+//           aren't anchored.
+//  Phase 2 (opt-in via `phase2`): keep only cells lying on SOME
+//           shortest path from entrance to an anchor (drops closed
+//           loops without anchors).
+//
+// Phase 2 makes sense when the anchor set is dense enough that the
+// shortest-path skeleton between anchors covers most useful terrain
+// — true for the swarm case (many member positions + frontier cells
+// → meaningful skeleton). For solo callers the anchor set is sparse
+// (entrance, maybe-goal, perception boundary, self) and phase 2
+// drops side branches the agent legitimately wants to explore
+// (scent gradients, water pits, alternative routes). Solo callers
+// should pass phase2=false.
+//
+// Anchor set, gated on `walkable[p]` to preserve PO:
+//   - Maze entrance (always, if perceived)
+//   - Maze goal (only if perceived — KnownCells acts as the gate)
+//   - Frontier cells (perceived cells with at least one unperceived
+//     neighbor — places we still want to explore from)
+//   - Every position in `extraAnchors` (e.g. an agent's current cell)
+//
+// PO invariant: callers pass perception-bounded `known` sets, so the
+// goal anchor here is gated on the caller having perceived the goal.
+func (w *World) pruneGraph(known map[Pos]bool, extraAnchors []Pos, phase2 bool) map[Pos]bool {
 	walkable := map[Pos]bool{}
-	for p := range swarmKnown {
+	for p := range known {
 		if w.Maze.IsWalkable(p) {
 			walkable[p] = true
 		}
@@ -88,10 +166,6 @@ func (w *World) pruneSwarmGraph(swarmKnown map[Pos]bool) map[Pos]bool {
 		return walkable
 	}
 
-	// Anchors = cells we never prune. Includes entrance, goal,
-	// frontier cells, and every alive swarm member's current cell
-	// (so an agent that's currently in a dead-end can still plan
-	// its way out).
 	anchors := map[Pos]bool{}
 	if walkable[w.Maze.EntrancePos] {
 		anchors[w.Maze.EntrancePos] = true
@@ -105,15 +179,15 @@ func (w *World) pruneSwarmGraph(swarmKnown map[Pos]bool) map[Pos]bool {
 			if !InBounds(np.X, np.Y) {
 				continue
 			}
-			if !swarmKnown[np] {
+			if !known[np] {
 				anchors[p] = true
 				break
 			}
 		}
 	}
-	for _, peer := range w.Agents {
-		if peer.Alive && peer.CurrentStrategy == SwarmStrategyLetter && walkable[peer.Pos] {
-			anchors[peer.Pos] = true
+	for _, p := range extraAnchors {
+		if walkable[p] {
+			anchors[p] = true
 		}
 	}
 
@@ -146,11 +220,12 @@ func (w *World) pruneSwarmGraph(swarmKnown map[Pos]bool) map[Pos]bool {
 		}
 	}
 
+	if !phase2 {
+		return alive
+	}
+
 	// Phase 2: shortest-path essential-cell labeling. Cells not on
 	// SOME shortest path from entrance to an anchor get pruned.
-	// This eliminates closed loops with no anchors (their cells
-	// have ≥ 2 alive neighbors so phase 1 missed them, but they're
-	// not on any entrance↔anchor shortest path).
 	if !alive[w.Maze.EntrancePos] {
 		return alive
 	}
@@ -176,10 +251,6 @@ func (w *World) pruneSwarmGraph(swarmKnown map[Pos]bool) map[Pos]bool {
 			}
 		}
 	}
-	// Entrance is always essential; anchors that couldn't be
-	// reached from entrance (degenerate post-leaf-trim cases) stay
-	// alive too — they may yet become useful next tick when the
-	// swarm grows.
 	essential[w.Maze.EntrancePos] = true
 	for a := range anchors {
 		if alive[a] {
@@ -195,21 +266,9 @@ func (w *World) pruneSwarmGraph(swarmKnown map[Pos]bool) map[Pos]bool {
 // under the same movement model as the rest of the game.
 func (w *World) bfsAlive(start Pos, alive map[Pos]bool) map[Pos]int {
 	dist := map[Pos]int{start: 0}
-	type item struct {
-		pos  Pos
-		cost int
-	}
-	pq := []item{{start, 0}}
-	for len(pq) > 0 {
-		mi := 0
-		for i := 1; i < len(pq); i++ {
-			if pq[i].cost < pq[mi].cost {
-				mi = i
-			}
-		}
-		cur := pq[mi]
-		pq[mi] = pq[len(pq)-1]
-		pq = pq[:len(pq)-1]
+	pq := &dijkstraPQ{{start, 0}}
+	for pq.Len() > 0 {
+		cur := heap.Pop(pq).(dijkstraItem)
 		if cur.cost > dist[cur.pos] {
 			continue
 		}
@@ -226,7 +285,7 @@ func (w *World) bfsAlive(start Pos, alive map[Pos]bool) map[Pos]int {
 				continue
 			}
 			dist[np] = newCost
-			pq = append(pq, item{np, newCost})
+			heap.Push(pq, dijkstraItem{np, newCost})
 		}
 	}
 	return dist

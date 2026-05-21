@@ -37,14 +37,13 @@ import (
 //     pruning) if the union has grown since last tick.
 //  3. Restrict the agent's effective KnownCells to the pruned set
 //     for the duration of this call (dead-ends and useless loops
-//     become wall-equivalent for the BayesianStrategy planner).
-//  4. Run BayesianStrategy on the pruned view; restore the
-//     agent's full KnownCells on return.
+//     become wall-equivalent for the planner).
+//  4. Run the shared Bayesian planning core directly (bypassing
+//     BayesianStrategy's per-agent prune wrapper — the swarm
+//     pruning replaces it).
 func SwarmBayesianStrategy(w *world.World, a *world.Agent) world.Pos {
 	mergeSwarmKnowledge(w, a)
 	w.RecomputeSwarmGraphIfStale()
-	// Build the pruned view of a.KnownCells — anything in the
-	// swarm dead set drops out. Swap in for this call only.
 	orig := a.KnownCells
 	pruned := make(map[world.Pos]bool, len(orig))
 	for p := range orig {
@@ -57,7 +56,7 @@ func SwarmBayesianStrategy(w *world.World, a *world.Agent) world.Pos {
 	pruned[a.Pos] = true
 	a.KnownCells = pruned
 	defer func() { a.KnownCells = orig }()
-	return BayesianStrategy(w, a)
+	return bayesianStrategyPlan(w, a)
 }
 
 // mergeSwarmKnowledge syncs `a` with every other alive agent

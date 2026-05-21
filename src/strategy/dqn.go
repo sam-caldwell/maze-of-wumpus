@@ -26,8 +26,26 @@ func directionAction(from, to world.Pos) int {
 	return 0
 }
 
-// DQNStrategy: the entry-point for agent E.
+// DQNStrategy: the entry-point for the DQN agent.
+//
+// Applies the per-agent graph prune to a.KnownCells before the rest
+// of the policy runs. Direct effect on action selection is small —
+// DQN argmax over 8 cardinal actions doesn't filter by KnownCells —
+// but the water-override path (WaterOverride → bfsTowardKnown)
+// becomes consistent with T/U/W's pruned view: shorter PO paths to
+// known water pits, and dead-end corridors no longer get traversed
+// just because they happen to contain a perceived pit elsewhere.
+// Perceived water pits are added as prune anchors at the world
+// layer so leaf-trim cannot trim them away.
 func DQNStrategy(w *world.World, a *world.Agent) world.Pos {
+	restore := applyAgentPrunedView(w, a)
+	defer restore()
+	return dqnStrategyPlan(w, a)
+}
+
+// dqnStrategyPlan is the inner policy. Assumes a.KnownCells has been
+// set to the view the caller wants the water-override BFS to see.
+func dqnStrategyPlan(w *world.World, a *world.Agent) world.Pos {
 	if step, ok := w.CachedStepFor(a); ok {
 		return step
 	}

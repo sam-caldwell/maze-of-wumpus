@@ -10,12 +10,61 @@
 package world
 
 import (
+	"container/heap"
 	"math"
 	"math/rand"
 )
 
+// dijkstraItem is one frontier entry: a cell and the best cost found
+// so far to reach it. The priority queue orders by cost ascending.
+type dijkstraItem struct {
+	pos  Pos
+	cost int
+}
+
+// dijkstraPQ is a min-heap over dijkstraItem.cost. Implements
+// container/heap.Interface so heap.Push/Pop run in O(log n) instead
+// of the O(n) linear scan the prior implementation used. Used by
+// DijkstraPath, CountShortestPaths, and bfsAlive.
+type dijkstraPQ []dijkstraItem
+
+func (q dijkstraPQ) Len() int           { return len(q) }
+func (q dijkstraPQ) Less(i, j int) bool { return q[i].cost < q[j].cost }
+func (q dijkstraPQ) Swap(i, j int)      { q[i], q[j] = q[j], q[i] }
+func (q *dijkstraPQ) Push(x any)        { *q = append(*q, x.(dijkstraItem)) }
+func (q *dijkstraPQ) Pop() any {
+	old := *q
+	n := len(old)
+	x := old[n-1]
+	*q = old[:n-1]
+	return x
+}
+
 // RespawnTicks: 1 second at 100ms/tick.
 const RespawnTicks = 10
+
+// DefaultSmellRadius bounds an agent's scent perception. Moore-
+// connected, wall-blocked BFS — the agent can smell its own cell
+// plus every cell reachable in ≤ DefaultSmellRadius Moore steps
+// without crossing a wall.
+const DefaultSmellRadius = 2
+
+// DefaultSightRadius bounds an agent's terrain perception (the BFS
+// depth of MarkAgentSensed). Moore-connected, wall-blocked — the
+// agent "sees" its own cell plus every cell reachable in ≤
+// DefaultSightRadius steps without crossing a wall. Walls themselves
+// enter KnownCells but block propagation.
+//
+// 100 is generous but NOT omniscience: sight is strictly wall-
+// respecting. In a typical maze with twisty corridors the agent
+// perceives only its current wall-connected component out to 100
+// steps — usually a small fraction of the 9600-cell board. In the
+// open-field maze variant (or in large rooms) the same radius
+// covers most of the reachable space because there are no walls
+// to stop propagation. R (omniscient BFS) keeps its perception
+// advantage in maze regions; PO strategies still have to walk to
+// learn what's around the corner.
+const DefaultSightRadius = 100
 
 // TTLMultiplier: an agent dies if its current-attempt ActualDistance
 // exceeds TTLMultiplier × OptimalDistance.
@@ -297,13 +346,35 @@ type Agent struct {
 	// world → new Agent struct → zero value).
 	KnownShortestPath []Pos
 
-	// SensingRadius bounds the BFS depth of MarkAgentSensed (the
-	// agent's perception range). 0 or 1 = the legacy 1-step
-	// "current cell + 4 cardinal neighbors" range; 2 = a wider
-	// "current cell + every wall-respecting cell reachable in ≤2
-	// cardinal steps" range. Used by the far-sight agents 8/9/A/B/C
-	// (clones of 3/4/5/6/7 with radius 2).
-	SensingRadius int
+	// SmellRadius bounds the BFS depth of ScentSensedCells — the
+	// agent's *olfactory* range, used for trustee/scent shaping
+	// and DQN scent slots. Defaults to DefaultSmellRadius (2).
+	// Moore-connected, wall-blocked.
+	SmellRadius int
+
+	// SightRadius bounds the BFS depth of MarkAgentSensed — the
+	// agent's *visual* range over the maze terrain (KnownCells).
+	// Defaults to DefaultSightRadius (10). Moore-connected
+	// (8-direction) BFS; walls ARE added to KnownCells (the
+	// agent learns wall positions) but block propagation.
+	//
+	// Note: sight ≥ 10 means an agent within line-of-sight of the
+	// goal cell will perceive it (and thus enter the goal-known
+	// PO branch). Strict-PO contract is preserved — agents only
+	// "know" GoalPos once it's in KnownCells.
+	SightRadius int
+
+	// PrunedKnownCells is the cached output of
+	// World.RecomputeAgentPrunedViewIfStale — KnownCells after
+	// leaf-trim + articulation pruning. Solo PO strategies plan
+	// against this view so interior dead-ends and unreachable loops
+	// are skipped. nil until the first prune-recompute.
+	PrunedKnownCells map[Pos]bool
+
+	// prunedKnownSize is len(KnownCells) at the last prune-recompute.
+	// KnownCells is monotonic within a map life so a size delta is
+	// a sufficient dirty signal.
+	prunedKnownSize int
 
 	// LearnedTTL is the agent's belief about how many steps it can
 	// take before the TTL killer fires. 0 means "unknown" (the
@@ -705,10 +776,16 @@ func NewWorldWithConfig(cfg Config) *World {
 	// POMCP / QMDP) and DQN (deep Q-network). DQN weights take ~1KB
 	// per agent — negligible at 12 agents.
 	labels := []rune{'1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C'}
-	respawnOffsets := []int{1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31, 34}
+	// Initial spawn stagger: agent i appears 1 second (= RespawnTicks
+	// ticks at the 100ms tick interval) after agent i-1. So agent 1
+	// is on the board at tick 1, agent 2 at tick 11, agent 3 at tick
+	// 21, etc. The visible rollout lets the user (and the rendering
+	// pipeline) catch each agent's entrance distinctly instead of
+	// the whole roster materializing in one frame.
 	w.Agents = make([]*Agent, 0, len(labels))
 	for i, l := range labels {
-		a := newAgent(&w.nextAgentID, l, stratFor(l), NewAgentBeliefs(), respawnOffsets[i])
+		offset := 1 + i*RespawnTicks
+		a := newAgent(&w.nextAgentID, l, stratFor(l), NewAgentBeliefs(), offset)
 		a.DQN = NewDQN(w.Rng)
 		w.Agents = append(w.Agents, a)
 	}
@@ -717,13 +794,15 @@ func NewWorldWithConfig(cfg Config) *World {
 	for _, a := range w.Agents {
 		a.Disabled = false
 	}
-	// Far-sight perception range: labels 8, 9, A, B, C get
-	// SensingRadius=2; everyone else defaults to 1.
+	// Uniform perception: every agent smells in a Moore radius of
+	// DefaultSmellRadius (2 cells, wall-blocked) and sees in a
+	// 4-connected radius of DefaultSightRadius (10 cells, wall-
+	// blocked). Far-sight labels 8/9/A/B/C used to receive a
+	// boosted SensingRadius=2; that distinction is gone — perception
+	// is uniform across the roster.
 	for _, a := range w.Agents {
-		switch a.Label {
-		case '8', '9', 'A', 'B', 'C':
-			a.SensingRadius = 2
-		}
+		a.SmellRadius = DefaultSmellRadius
+		a.SightRadius = DefaultSightRadius
 	}
 
 	// Initial CurrentTrustee is left at 0; RespawnAgents calls
@@ -800,29 +879,22 @@ func (w *World) DijkstraPath(from, to Pos, walkable func(Pos) bool) []Pos {
 	}
 	dist := map[Pos]int{from: 0}
 	prev := map[Pos]Pos{}
-	type item struct {
-		pos  Pos
-		cost int
-	}
-	pq := []item{{from, 0}}
-	for len(pq) > 0 {
-		// Extract-min (simple linear scan; grid is small).
-		mi := 0
-		for i := 1; i < len(pq); i++ {
-			if pq[i].cost < pq[mi].cost {
-				mi = i
-			}
-		}
-		cur := pq[mi]
-		pq[mi] = pq[len(pq)-1]
-		pq = pq[:len(pq)-1]
+	pq := &dijkstraPQ{{from, 0}}
+	for pq.Len() > 0 {
+		cur := heap.Pop(pq).(dijkstraItem)
 		if cur.cost > dist[cur.pos] {
 			continue
 		}
 		if cur.pos == to {
-			var path []Pos
+			// Walk back through prev, append in reverse, then flip
+			// once. Avoids the O(L²) prepend the prior implementation
+			// did via `append([]Pos{p}, path...)`.
+			path := []Pos{}
 			for p := to; p != from; p = prev[p] {
-				path = append([]Pos{p}, path...)
+				path = append(path, p)
+			}
+			for i, j := 0, len(path)-1; i < j; i, j = i+1, j-1 {
+				path[i], path[j] = path[j], path[i]
 			}
 			return path
 		}
@@ -840,7 +912,7 @@ func (w *World) DijkstraPath(from, to Pos, walkable func(Pos) bool) []Pos {
 			}
 			dist[np] = newCost
 			prev[np] = cur.pos
-			pq = append(pq, item{np, newCost})
+			heap.Push(pq, dijkstraItem{np, newCost})
 		}
 	}
 	return nil
@@ -888,21 +960,9 @@ func (w *World) CountShortestPaths(from, to Pos, cap int) int {
 		}
 		return v
 	}
-	type item struct {
-		pos  Pos
-		cost int
-	}
-	pq := []item{{from, 0}}
-	for len(pq) > 0 {
-		mi := 0
-		for i := 1; i < len(pq); i++ {
-			if pq[i].cost < pq[mi].cost {
-				mi = i
-			}
-		}
-		cur := pq[mi]
-		pq[mi] = pq[len(pq)-1]
-		pq = pq[:len(pq)-1]
+	pq := &dijkstraPQ{{from, 0}}
+	for pq.Len() > 0 {
+		cur := heap.Pop(pq).(dijkstraItem)
 		if cur.cost > dist[cur.pos] {
 			continue
 		}
@@ -918,7 +978,7 @@ func (w *World) CountShortestPaths(from, to Pos, cap int) int {
 			if cd, ok := dist[np]; !ok || newCost < cd {
 				dist[np] = newCost
 				paths[np] = clamp(paths[cur.pos])
-				pq = append(pq, item{np, newCost})
+				heap.Push(pq, dijkstraItem{np, newCost})
 			} else if newCost == cd {
 				paths[np] = clamp(paths[np] + paths[cur.pos])
 			}
@@ -2149,26 +2209,22 @@ var mooreDeltas = [8]Pos{
 
 // ScentSensedCells returns the set of cells whose scent agent `a`
 // can currently perceive. Computed as a Moore-connected BFS from
-// a.Pos out to a.SensingRadius (or 1 if unset). Walls block
-// propagation — a wall cell itself is NOT included in the result
-// (walls carry no scent), but the BFS stops at walls so cells past
-// them are unreachable.
+// a.Pos out to a.SmellRadius (default DefaultSmellRadius = 2).
+// Walls block propagation — a wall cell itself is NOT included in
+// the result (walls carry no scent), but the BFS stops at walls so
+// cells past them are unreachable.
 //
 // Used by:
 //   - ApplyScentShaping (aggregate trustee / negative-trust signal).
 //   - ScentSignedFreshness (cell-level gate for DQN / QL features).
 //   - JourneyTrusteeContactTicks (contact bump for trust update).
 //
-// Radius semantics:
-//
-//	radius 0 or 1 (default for agents 1-7): current cell + 8 Moore
-//	    neighbors → up to 9 cells.
-//	radius 2 (far-sight agents 8, 9, A, B, C): up to 25 cells in a
-//	    5×5 box minus walls and cells blocked by walls.
+// At the default radius of 2, the result contains up to 25 cells in
+// a 5×5 box minus walls and cells blocked by walls.
 func (w *World) ScentSensedCells(a *Agent) map[Pos]bool {
-	radius := a.SensingRadius
+	radius := a.SmellRadius
 	if radius < 1 {
-		radius = 1
+		radius = DefaultSmellRadius
 	}
 	sensed := map[Pos]bool{a.Pos: true}
 	type node struct {
@@ -2240,7 +2296,7 @@ func (w *World) ScentSignedFreshness(a *Agent, x, y int) float64 {
 // ApplyScentShaping returns the per-step scent-shaping bonus for `a`
 // aggregated across every cell the agent can currently perceive
 // (a Moore-connected, wall-respecting neighborhood out to
-// a.SensingRadius — see ScentSensedCells):
+// a.SmellRadius — see ScentSensedCells):
 //
 //	bonus = mag × (maxTrusteeFreshness − maxNegativeTrustFreshness)
 //
@@ -2764,25 +2820,34 @@ func (w *World) ScentFreshness(x, y int) float64 {
 }
 
 // MarkAgentSensed extends a.KnownCells with every cell the agent
-// can perceive this tick. Range is a wall-respecting BFS up to
-// a.SensingRadius cardinal steps:
+// can perceive this tick. Wall-respecting Moore-connected
+// (8-direction) BFS out to a.SightRadius steps (default
+// DefaultSightRadius = 10), plus a wall-adjacency rule: when the
+// agent perceives a path cell, it also perceives that cell's 8
+// Moore neighbors. This lets the agent see whether perceived
+// path cells are at dead-ends (1 walkable neighbor), corners
+// (perpendicular walkable neighbors), or junctions (≥ 3 walkable
+// neighbors).
 //
-//   - SensingRadius ≤ 1 (default): the agent's cell + its 4 cardinal
-//     neighbors (the legacy "flashlight" range).
-//   - SensingRadius = 2 (far-sight agents 8/9/A/B/C): every cell
-//     reachable in ≤2 cardinal steps without crossing a wall.
+// The adjacency rule is implemented as a 1-step "lookahead": every
+// path cell dequeued at the boundary (depth == radius) still marks
+// its Moore neighbors as known, just doesn't enqueue them. So
+// perception effectively extends 1 cell past the BFS radius, but
+// only as a marking pass — no propagation through walls beyond
+// the boundary.
 //
-// Walls themselves ARE added to KnownCells (the agent learns where
-// walls are) but they block further propagation — agents can't see
-// past walls. Called by MoveAgents (post-move) and RespawnAgents
-// (post-spawn).
+// Walls themselves block propagation: a wall cell enters KnownCells
+// but the BFS doesn't extend past it, so the agent never sees cells
+// hidden behind a wall.
+//
+// Called by MoveAgents (post-move) and RespawnAgents (post-spawn).
 func (w *World) MarkAgentSensed(a *Agent) {
 	if a.KnownCells == nil {
 		a.KnownCells = map[Pos]bool{}
 	}
-	radius := a.SensingRadius
+	radius := a.SightRadius
 	if radius < 1 {
-		radius = 1
+		radius = DefaultSightRadius
 	}
 	a.KnownCells[a.Pos] = true
 	type node struct {
@@ -2794,18 +2859,25 @@ func (w *World) MarkAgentSensed(a *Agent) {
 	for len(queue) > 0 {
 		cur := queue[0]
 		queue = queue[1:]
-		if cur.depth >= radius {
-			continue
-		}
+		// Boundary handling: when cur is a path cell at the
+		// perception edge, still mark its Moore neighbors so the
+		// agent can see local shape. The neighbors aren't
+		// enqueued — perception doesn't propagate further.
+		atBoundary := cur.depth >= radius
 		for _, d := range Cardinals {
 			np := Pos{X: cur.p.X + d.X, Y: cur.p.Y + d.Y}
-			if !InBounds(np.X, np.Y) || visited[np] {
+			if !InBounds(np.X, np.Y) {
+				continue
+			}
+			a.KnownCells[np] = true
+			if atBoundary {
+				continue
+			}
+			if visited[np] {
 				continue
 			}
 			visited[np] = true
-			a.KnownCells[np] = true
-			// Walls are perceived (added to KnownCells) but block
-			// further BFS expansion — you can't see past a wall.
+			// Walls block further BFS expansion.
 			if w.Maze.Cells[np.Y][np.X] == CellWall {
 				continue
 			}

@@ -12,8 +12,41 @@ import (
 	"maze-of-wumpus/src/world"
 )
 
-// BayesianStrategy is the entry-point for agent A.
+// BayesianStrategy is the entry-point for agent T (solo PO Bayesian).
+// Applies a per-agent graph prune to a.KnownCells (so interior
+// dead-ends and unreachable loops drop out of the planning view),
+// then runs the shared planning core. SwarmBayesianStrategy reuses
+// the core directly — the swarm has its own pruning pass.
 func BayesianStrategy(w *world.World, a *world.Agent) world.Pos {
+	restore := applyAgentPrunedView(w, a)
+	defer restore()
+	return bayesianStrategyPlan(w, a)
+}
+
+// applyAgentPrunedView swaps a.KnownCells for the lazy-cached pruned
+// view (rebuilt when stale via World.RecomputeAgentPrunedViewIfStale)
+// and returns a restore closure. a.Pos is always kept in the pruned
+// view so the planner can plan from the agent's current cell even
+// if pruning would otherwise have dropped it.
+func applyAgentPrunedView(w *world.World, a *world.Agent) func() {
+	w.RecomputeAgentPrunedViewIfStale(a)
+	if a.PrunedKnownCells == nil {
+		return func() {}
+	}
+	orig := a.KnownCells
+	view := make(map[world.Pos]bool, len(a.PrunedKnownCells)+1)
+	for p := range a.PrunedKnownCells {
+		view[p] = true
+	}
+	view[a.Pos] = true
+	a.KnownCells = view
+	return func() { a.KnownCells = orig }
+}
+
+// bayesianStrategyPlan is the inner planning core. Assumes
+// a.KnownCells has already been set to whatever view the caller
+// wants the planner to see (raw, solo-pruned, or swarm-pruned).
+func bayesianStrategyPlan(w *world.World, a *world.Agent) world.Pos {
 	if step, ok := w.CachedStepFor(a); ok {
 		return step
 	}
@@ -141,10 +174,32 @@ func wwBFS(w *world.World, a *world.Agent, from, to world.Pos, strict bool) []wo
 }
 
 // wwNearestSafeFrontier walks the safe-set BFS from the agent's
-// current cell and returns the first safe-but-unvisited cell.
+// current cell and returns the nearest safe cell on the *perception
+// boundary* — a perceived (in a.KnownCells) walkable cell that has
+// at least one neighbor the agent has NOT perceived. Walking there
+// expands the agent's KnownCells past the current sight horizon.
+//
+// Under sight=10 this is much sparser than "any safe unvisited cell"
+// (the previous semantics): interior perceived cells are skipped
+// because no new perception is gained from stepping onto them.
+// Combined with the per-agent prune (RecomputeAgentPrunedViewIfStale)
+// this stops the agent from threading through already-perceived
+// dead-ends just because it hasn't physically stood on them.
 func wwNearestSafeFrontier(w *world.World, a *world.Agent) (world.Pos, bool) {
 	if a.Beliefs == nil {
 		return world.Pos{}, false
+	}
+	isPerceptionBoundary := func(p world.Pos) bool {
+		for _, d := range world.Cardinals {
+			np := world.Pos{X: p.X + d.X, Y: p.Y + d.Y}
+			if !world.InBounds(np.X, np.Y) {
+				continue
+			}
+			if !a.KnownCells[np] {
+				return true
+			}
+		}
+		return false
 	}
 	queue := []world.Pos{a.Pos}
 	visited := map[world.Pos]bool{a.Pos: true}
@@ -162,7 +217,7 @@ func wwNearestSafeFrontier(w *world.World, a *world.Agent) (world.Pos, bool) {
 			if !wwCellOK(w, a, np) {
 				continue
 			}
-			if !a.Beliefs.Observed[np] {
+			if isPerceptionBoundary(np) {
 				return np, true
 			}
 			visited[np] = true

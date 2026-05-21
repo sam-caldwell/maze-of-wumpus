@@ -7,12 +7,50 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 
 	"maze-of-wumpus/src/world"
 )
+
+// ansiReset closes a 256-color FG/BG escape sequence. Used as a
+// suffix on every precomputed colored cell.
+const ansiReset = "\x1b[0m"
+
+// trustCellByIdx[i] is the colored '█' block for heat index i, fully
+// wrapped in ANSI escape codes. Built once at init() so trustCell()
+// is a slice lookup instead of a per-call fmt.Sprintf. With ~228
+// trust-cell calls per render this is the biggest single TUI alloc
+// reduction in the View hot path.
+var trustCellByIdx [16]string
+
+// trustDiagCell and trustEmptyCell render the two non-heat variants
+// of a matrix cell (self-diagonal dim '·' and "no data" white '-').
+// Both are immutable so they live as package-level constants.
+const trustDiagCell = "\x1b[38;5;240m·" + ansiReset
+const trustEmptyCell = "\x1b[38;5;255m-" + ansiReset
+
+// legendCellByIdx[i] is the precomputed "█ <2-digit idx>" cell shown
+// in the heat legend column to the right of the Agent-Agent matrix.
+var legendCellByIdx [16]string
+
+// strategyPerfBgPrefix[i] is the ANSI "bg + bright-white fg" opening
+// escape sequence for strategy-performance heat index i. Built once;
+// strategyPerfCell concatenates this with a manually-formatted int
+// and ansiReset to render a single perf cell.
+var strategyPerfBgPrefix [16]string
+
+func init() {
+	for i, fg := range trustHeatFG {
+		trustCellByIdx[i] = fmt.Sprintf("\x1b[38;5;%dm█%s", fg, ansiReset)
+		legendCellByIdx[i] = fmt.Sprintf("\x1b[38;5;%dm█%s %2d", fg, ansiReset, i)
+	}
+	for i, bg := range strategyPerfHeatBG {
+		strategyPerfBgPrefix[i] = fmt.Sprintf("\x1b[48;5;%dm\x1b[38;5;255m", bg)
+	}
+}
 
 // trustMatrixTitleStyle is the bold caption that sits above the
 // trust grid in the TUI.
@@ -60,7 +98,8 @@ var strategyPerfHeatBG = [16]int{
 // background-colored cell. `max` is the column maximum (for
 // normalization to [0,15]); a zero max leaves the cell at index 0.
 // Foreground text is bright white (255) for legibility on any
-// background in the palette.
+// background in the palette. Uses a precomputed bg-prefix table and
+// manual int formatting to avoid per-cell fmt.Sprintf allocations.
 func strategyPerfCell(value, width, max int) string {
 	idx := 0
 	if max > 0 {
@@ -71,8 +110,20 @@ func strategyPerfCell(value, width, max int) string {
 			idx = 0
 		}
 	}
-	bg := strategyPerfHeatBG[idx]
-	return fmt.Sprintf("\x1b[48;5;%dm\x1b[38;5;255m%*d\x1b[0m", bg, width, value)
+	s := strconv.Itoa(value)
+	pad := width - len(s)
+	if pad < 0 {
+		pad = 0
+	}
+	var b strings.Builder
+	b.Grow(len(strategyPerfBgPrefix[idx]) + pad + len(s) + len(ansiReset))
+	b.WriteString(strategyPerfBgPrefix[idx])
+	for i := 0; i < pad; i++ {
+		b.WriteByte(' ')
+	}
+	b.WriteString(s)
+	b.WriteString(ansiReset)
+	return b.String()
 }
 
 // trustColorIdx maps a numeric trust score to a heat index in
@@ -90,15 +141,16 @@ func trustColorIdx(score float64) int {
 
 // trustCell renders a single matrix cell as a 1-char ANSI-colored
 // block (`█` in the heat color). 'isDiag' overrides to a dim '·'.
+// Lookup-only — the colored variants are precomputed in
+// trustCellByIdx at init().
 func trustCell(score float64, present bool, isDiag bool) string {
 	if isDiag {
-		return "\x1b[38;5;240m·\x1b[0m"
+		return trustDiagCell
 	}
 	if !present {
-		return "\x1b[38;5;255m-\x1b[0m" // bright white
+		return trustEmptyCell
 	}
-	idx := trustColorIdx(score)
-	return fmt.Sprintf("\x1b[38;5;%dm█\x1b[0m", trustHeatFG[idx])
+	return trustCellByIdx[trustColorIdx(score)]
 }
 
 // renderTrustMatrixLines builds the trust matrix as a slice of pre-
@@ -282,7 +334,8 @@ func renderTrustMatrixLines(w *world.World) []string {
 
 // legendCell renders one "glyph value" pair for the legend, with
 // the colored heat block followed by the 0-15 trust index in
-// 2-char-aligned form so columns line up.
+// 2-char-aligned form so columns line up. Lookup-only; the strings
+// are precomputed in legendCellByIdx at init().
 func legendCell(idx int) string {
-	return fmt.Sprintf("\x1b[38;5;%dm█\x1b[0m %2d", trustHeatFG[idx], idx)
+	return legendCellByIdx[idx]
 }
