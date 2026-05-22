@@ -174,7 +174,7 @@ func pomcpRollout(w *world.World, a *world.Agent, from world.Pos, rng *rand.Rand
 	// the goal is until it senses it.
 	distFromStart := 0
 	if world.InBounds(pos.X, pos.Y) {
-		if d := w.DistFromStart[pos.Y][pos.X]; d > 0 {
+		if d := a.DistFromStart[pos.Y][pos.X]; d > 0 {
 			distFromStart = d
 		}
 	}
@@ -204,7 +204,7 @@ func pomcpSampleNext(w *world.World, a *world.Agent, pos world.Pos, rng *rand.Ra
 		// than aiming at the (unknown) goal. DistFromStart is the
 		// only spatial signal the agent legitimately holds.
 		distFromStart := 0
-		if d := w.DistFromStart[np.Y][np.X]; d > 0 {
+		if d := a.DistFromStart[np.Y][np.X]; d > 0 {
 			distFromStart = d
 		}
 		var pitP, wumpP float64

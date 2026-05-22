@@ -17,27 +17,28 @@ import (
 	"maze-of-wumpus/src/world"
 )
 
-// ScentFollowerStrategy is agent 6's strict-PO decision rule.
+// ScentFollowerStrategy is the scent-follower's strict-PO decision rule.
 //
 // Each call:
 //  1. Apply the per-agent graph prune to a.KnownCells so cardinal
 //     neighbors leading into perceived dead-end chains drop out.
-//     This means a strong scent emanating from a dead-end branch
-//     no longer lures the agent into it — the dead-end cells are
-//     no longer "walkable" from the planner's view.
 //  2. Use a.CurrentTrustee — the attract label picked once per map
 //     (uniform on the first map, weighted by TrustScores on later
 //     maps). This is the agent's "who do I follow this map?" answer.
 //  3. Score every walkable known cardinal neighbor:
 //     trustee scent       → +safety × freshness
-//     repel-scent         → −safety × freshness
-//     negative-trust scent → −safety × freshness (dynamic repel)
+//     negative-trust scent → skip (dynamic repel)
 //     anything else        → 0
-//  4. Return argmax; fall back to outward bias (highest
-//     DistFromStart) when nothing scored above zero.
+//  4. Return argmax. **If no neighbor carries the trustee's scent**
+//     (the trail's been lost), revert to a non-scent-following mode:
+//     run the Bayesian planning core (bayesianStrategyPlan) — which
+//     navigates to the goal if perceived, otherwise expands the
+//     perception frontier. Both outcomes help reacquire the trail
+//     (more terrain explored) or finish the run (goal located).
 //
 // Strict PO: only senses scent at cells in `a.KnownCells`. Never
-// references `w.Maze.GoalPos`.
+// references `w.Maze.GoalPos` directly — the Bayesian fallback
+// gates GoalPos reads on a.KnownCells[GoalPos].
 func ScentFollowerStrategy(w *world.World, a *world.Agent) world.Pos {
 	restore := applyAgentPrunedView(w, a)
 	defer restore()
@@ -52,27 +53,18 @@ func scentFollowerStrategyPlan(w *world.World, a *world.Agent) world.Pos {
 		return step
 	}
 	UpdateAgentBeliefs(w, a) // maintain the Bayesian safety layer
-	if !world.IsScentFollower(a.Label) {
-		return outwardBiasNeighbor(w, a)
+	// Non-follower or no trustee → there's nothing to follow; defer
+	// directly to the Bayesian planner (find the goal / explore).
+	if !world.IsScentFollower(a.Label) || a.CurrentTrustee == 0 {
+		return bayesianStrategyPlan(w, a)
 	}
 	pick := a.CurrentTrustee
-	if pick == 0 {
-		// PickTrustee hasn't fired yet (agent not yet respawned this
-		// journey) — fall back to outward exploration.
-		return outwardBiasNeighbor(w, a)
-	}
 	best := a.Pos
 	bestVal := 0.0
-	bestFallback := a.Pos
-	bestFallbackDist := -1
 	for _, d := range world.Cardinals {
 		np := world.Pos{X: a.Pos.X + d.X, Y: a.Pos.Y + d.Y}
 		if !knownWalkable(w, a, np) {
 			continue
-		}
-		if df := w.DistFromStart[np.Y][np.X]; df > bestFallbackDist {
-			bestFallbackDist = df
-			bestFallback = np
 		}
 		owner := w.ScentOwner[np.Y][np.X]
 		freshness := w.ScentFreshness(np.X, np.Y)
@@ -100,7 +92,12 @@ func scentFollowerStrategyPlan(w *world.World, a *world.Agent) world.Pos {
 	if best != a.Pos {
 		return best
 	}
-	return bestFallback
+	// Lost the trail. Switch to non-scent-following mode for this
+	// tick: run the Bayesian planner. It'll route toward goal if
+	// perceived, or to the nearest safe perception-boundary cell
+	// otherwise — both of which give us a real shot at finding the
+	// gold OR uncovering fresh trustee scent.
+	return bayesianStrategyPlan(w, a)
 }
 
 // outwardBiasNeighbor picks the walkable cardinal neighbor with the
@@ -114,7 +111,7 @@ func outwardBiasNeighbor(w *world.World, a *world.Agent) world.Pos {
 		if !knownWalkable(w, a, np) {
 			continue
 		}
-		if df := w.DistFromStart[np.Y][np.X]; df > bestDist {
+		if df := a.DistFromStart[np.Y][np.X]; df > bestDist {
 			bestDist = df
 			best = np
 		}

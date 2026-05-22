@@ -262,9 +262,11 @@ func renderTrustMatrixLines(w *world.World) []string {
 		if c.Following > followingMax {
 			followingMax = c.Following
 		}
-		total := c.NoFollow + c.Following
-		if total > totalMax {
-			totalMax = total
+		// #Runs is the count of all runs STARTED on this strategy,
+		// regardless of outcome (TTL death, hazard death, goal
+		// reach). Bumped at RespawnAgents.
+		if c.Started > totalMax {
+			totalMax = c.Started
 		}
 	}
 	for _, l := range algoLetters {
@@ -272,13 +274,12 @@ func renderTrustMatrixLines(w *world.World) []string {
 		if c == nil {
 			c = &world.StrategyPerfCounts{}
 		}
-		total := c.NoFollow + c.Following
 		lines = append(lines, fmt.Sprintf(" %c  %s  %s  %s  %s",
 			l,
 			strategyPerfCell(c.TTLExpiry, 7, ttlMax),
 			strategyPerfCell(c.NoFollow, 12, noFollowMax),
 			strategyPerfCell(c.Following, 13, followingMax),
-			strategyPerfCell(total, 5, totalMax)))
+			strategyPerfCell(c.Started, 5, totalMax)))
 	}
 	// Algorithm legend: one row per letter, "<letter>  <description>".
 	// Spacer + bold title first so the legend sits visually distinct.

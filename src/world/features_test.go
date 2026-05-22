@@ -1019,7 +1019,7 @@ func TestPruneSwarmGraph_LeafTrim(t *testing.T) {
 	} {
 		known[p] = true
 	}
-	alive := w.pruneSwarmGraph(known)
+	alive := w.pruneSwarmGraph(known, 1)
 	if alive[leaf] {
 		t.Errorf("dead-end leaf %v survived prune", leaf)
 	}
@@ -1050,7 +1050,7 @@ func TestPruneSwarmGraph_KeepsFrontierBranch(t *testing.T) {
 		{X: 7, Y: 5}: true, {X: 8, Y: 5}: true,
 		{X: 6, Y: 6}: true,
 	}
-	alive := w.pruneSwarmGraph(known)
+	alive := w.pruneSwarmGraph(known, 1)
 	if !alive[Pos{X: 6, Y: 6}] {
 		t.Error("frontier cell (6,6) should survive prune")
 	}
@@ -1066,23 +1066,23 @@ func TestRecomputeSwarmGraphIfStale_CachesUntilGrowth(t *testing.T) {
 	a := SpawnAgentForTest(w, '3')
 	a.Alive = true
 	a.CurrentStrategy = SwarmStrategyLetter
+	a.SwarmGroupID = 1
 	a.KnownCells = map[Pos]bool{{X: 1, Y: 1}: true}
-	w.RecomputeSwarmGraphIfStale()
+	w.RecomputeSwarmGraphIfStale(1)
 	// Poke the cache with a sentinel cell that the BFS would never
 	// produce on its own.
 	sentinel := Pos{X: -1, Y: -1}
-	w.swarmGraph.aliveCells[sentinel] = true
-	// Second call with no growth: should be a no-op, sentinel
-	// survives.
-	w.RecomputeSwarmGraphIfStale()
-	if !w.swarmGraph.aliveCells[sentinel] {
+	w.swarmGraphs[1].aliveCells[sentinel] = true
+	// Second call with no growth: should be a no-op, sentinel survives.
+	w.RecomputeSwarmGraphIfStale(1)
+	if !w.swarmGraphs[1].aliveCells[sentinel] {
 		t.Error("second call recomputed despite no growth")
 	}
 	// Grow the union: now the cache should rebuild and sentinel
 	// gets wiped.
 	a.KnownCells[Pos{X: 2, Y: 2}] = true
-	w.RecomputeSwarmGraphIfStale()
-	if w.swarmGraph.aliveCells[sentinel] {
+	w.RecomputeSwarmGraphIfStale(1)
+	if w.swarmGraphs[1].aliveCells[sentinel] {
 		t.Error("third call (after growth) failed to rebuild — sentinel persisted")
 	}
 }
@@ -1254,9 +1254,9 @@ func TestGenerateMaze_OpenFieldVariantOccurs(t *testing.T) {
 		if !open {
 			continue
 		}
-		// Confirm entrance sits at interior top-left corner.
-		if w.Maze.EntrancePos != (Pos{X: 1, Y: 1}) {
-			t.Errorf("open-field entrance = %v, want (1,1)", w.Maze.EntrancePos)
+		// Confirm entrance sits at a non-corner perimeter cell.
+		if w.Maze.EntrancePos != (Pos{X: 1, Y: 0}) {
+			t.Errorf("open-field entrance = %v, want (1,0)", w.Maze.EntrancePos)
 		}
 		// Confirm goal is walkable and at least MinGoalDistanceCells
 		// from the entrance (random placement).
@@ -1338,9 +1338,13 @@ func TestEnforceBenchmarkSingleton_NoOpForOne(t *testing.T) {
 // TestEnforceSwarmQuorum_DraftsToThree: when only one alive agent
 // is on S, EnforceSwarmQuorum drafts two more alive non-S agents
 // to join, hitting the quorum of 3.
-func TestEnforceSwarmQuorum_DraftsToThree(t *testing.T) {
+// TestEnforceSwarmQuorum_IsNoOp: under the independent-swarm model
+// each S-picker is already a complete swarm (1 leader + 10 clones),
+// so the old "draft agents into S to meet quorum" rule no longer
+// applies. EnforceSwarmQuorum is kept as a no-op for backwards
+// compatibility — drafting must NOT happen.
+func TestEnforceSwarmQuorum_IsNoOp(t *testing.T) {
 	w := NewWorld(770)
-	// Mark all agents alive on non-S, then set just one to S.
 	for _, a := range w.Agents {
 		a.Alive = true
 		a.Disabled = false
@@ -1355,9 +1359,8 @@ func TestEnforceSwarmQuorum_DraftsToThree(t *testing.T) {
 			onSwarm++
 		}
 	}
-	if onSwarm < SwarmMinQuorum {
-		t.Errorf("after draft, S-count = %d, want ≥ %d",
-			onSwarm, SwarmMinQuorum)
+	if onSwarm != 1 {
+		t.Errorf("S-count = %d, want 1 (no drafting under new model)", onSwarm)
 	}
 }
 
@@ -1868,18 +1871,37 @@ func TestMazeSolved_Threshold(t *testing.T) {
 	}
 }
 
-// TestRespawnAgents_RetiresAtStartCap: once Stats.Starts reaches
-// MaxStartsPerMaze the agent stops respawning.
-func TestRespawnAgents_RetiresAtStartCap(t *testing.T) {
+// TestRespawnAgents_KeepsRespawningWithoutGoalCap: high Stats.Starts
+// no longer locks an agent out — only reaching MazeSolvedGoals does.
+// This guards against the previous bug where struggling agents got
+// permanently retired before contributing to the maze-solve.
+func TestRespawnAgents_KeepsRespawningWithoutGoalCap(t *testing.T) {
 	w := NewWorld(291)
 	a := w.AgentByLabel('1')
 	a.Disabled = false
 	a.Stats.Starts = MaxStartsPerMaze
+	a.Stats.GoalsReached = 0
+	a.Alive = false
+	a.RespawnIn = 0
+	w.RespawnAgents()
+	if !a.Alive {
+		t.Errorf("agent should still respawn at Starts=%d when GoalsReached=0",
+			MaxStartsPerMaze)
+	}
+}
+
+// TestRespawnAgents_RetiresAfterGoalCap: once Stats.GoalsReached hits
+// MazeSolvedGoals (mission accomplished), the agent stops respawning.
+func TestRespawnAgents_RetiresAfterGoalCap(t *testing.T) {
+	w := NewWorld(292)
+	a := w.AgentByLabel('1')
+	a.Disabled = false
+	a.Stats.GoalsReached = MazeSolvedGoals
 	a.Alive = false
 	a.RespawnIn = 0
 	w.RespawnAgents()
 	if a.Alive {
-		t.Errorf("agent should be retired at Starts=%d", MaxStartsPerMaze)
+		t.Errorf("agent should be retired at GoalsReached=%d", MazeSolvedGoals)
 	}
 }
 

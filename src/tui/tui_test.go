@@ -148,15 +148,23 @@ func TestView_TogglesReflectedInStatus(t *testing.T) {
 	}
 }
 
-// TestView_StatusShowsTTLMultiplier: the status footer renders the
-// TTLMultiplier value alongside the absolute TTL budget so the user
-// can see the scaling factor at a glance.
-func TestView_StatusShowsTTLMultiplier(t *testing.T) {
+// TestView_PerAgentTTLColumn: TTL is now surfaced per-agent in the
+// stats line (right of dist) rather than in the global status bar.
+// Verify the per-agent TTL columns render and the status bar no
+// longer carries a global TTL/multiplier value.
+func TestView_PerAgentTTLColumn(t *testing.T) {
 	m := newTestModel(1)
 	v := m.View()
-	want := fmt.Sprintf("×%d", world.TTLMultiplier)
-	if !strings.Contains(v, want) {
-		t.Errorf("status missing TTL multiplier %q: %q", want, v)
+	// Every agent line should contain a "TTL:NNNN" column.
+	for _, a := range m.World.Agents {
+		want := fmt.Sprintf("TTL:%04d", world.TTLMultiplier*a.OptimalDistance)
+		if !strings.Contains(v, want) {
+			t.Errorf("missing per-agent TTL column for %c (%q)", a.Label, want)
+		}
+	}
+	// The status bar should no longer contain a "×<multiplier>" token.
+	if strings.Contains(v, fmt.Sprintf("TTL %d ×%d", world.TTLMultiplier, world.TTLMultiplier)) {
+		t.Errorf("status bar should no longer contain global TTL/multiplier display")
 	}
 }
 

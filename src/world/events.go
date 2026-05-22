@@ -132,6 +132,12 @@ var deathByTTL = []string{
 	"Agent %c executed halt and catch fire!",
 	"Agent %c died...should have chosen a good game of chess",
 	"Fast Agent %c pulled an Enron...and ran out of TTL",
+	"Agent %c found the stairway to heaven",
+	"Agent %c: Have you seen my stapler?",
+	"Agent %c pulled the pin...and lost count.",
+	"Agent %c fought the law...and the law won.",
+	"Agent %c stood when he should have sat down",
+	"We're allowed one fatal mistake. Agent %c made it",
 	// Dr. Strangelove.
 	"Agent %c could not stop worrying. The bomb won",
 	"Agent %c precious bodily fluids ran out of TTL",

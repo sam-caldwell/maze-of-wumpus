@@ -24,17 +24,41 @@ func TestSwarmBayesian_SharesKnowledge(t *testing.T) {
 	b := world.SpawnAgentForTest(w, '4')
 	a.CurrentStrategy = StrategySwarmBayesian
 	b.CurrentStrategy = StrategySwarmBayesian
+	// Independent-swarm scoping: only agents sharing a SwarmGroupID
+	// merge. Force both into the same group for this test.
+	a.SwarmGroupID = 7
+	b.SwarmGroupID = 7
 	a.KnownCells = map[world.Pos]bool{{X: 1, Y: 1}: true}
 	b.KnownCells = map[world.Pos]bool{{X: 2, Y: 2}: true}
 	a.Beliefs = world.NewAgentBeliefs()
 	b.Beliefs = world.NewAgentBeliefs()
-	// Run the merge phase on agent a.
 	mergeSwarmKnowledge(w, a)
 	if !a.KnownCells[world.Pos{X: 2, Y: 2}] {
 		t.Error("a did not pick up b's cell")
 	}
 	if a.KnownCells[world.Pos{X: 999, Y: 999}] {
 		t.Error("a picked up a cell nobody saw")
+	}
+}
+
+// TestSwarmBayesian_IndependentSwarmsDoNotMerge: two S-agents with
+// DIFFERENT SwarmGroupIDs must not share state. Cross-swarm
+// isolation is the whole point of per-leader scoping.
+func TestSwarmBayesian_IndependentSwarmsDoNotMerge(t *testing.T) {
+	w := newConfiguredWorld(110)
+	a := world.SpawnAgentForTest(w, '3')
+	b := world.SpawnAgentForTest(w, '4')
+	a.CurrentStrategy = StrategySwarmBayesian
+	b.CurrentStrategy = StrategySwarmBayesian
+	a.SwarmGroupID = 1
+	b.SwarmGroupID = 2 // distinct swarm
+	a.KnownCells = map[world.Pos]bool{{X: 1, Y: 1}: true}
+	b.KnownCells = map[world.Pos]bool{{X: 2, Y: 2}: true}
+	a.Beliefs = world.NewAgentBeliefs()
+	b.Beliefs = world.NewAgentBeliefs()
+	mergeSwarmKnowledge(w, a)
+	if a.KnownCells[world.Pos{X: 2, Y: 2}] {
+		t.Error("swarm 1 picked up cell from swarm 2 — cross-swarm leak")
 	}
 }
 
@@ -137,10 +161,14 @@ func TestBFSStrategy_AllBranches(t *testing.T) {
 	killAllWumpus(w)
 	a := world.SpawnAgentForTest(w, '2')
 	a.Water = 1 // suppress the water-secondary-goal override
-	first := BFSStrategy(w, a)
-	if first == a.Pos {
-		t.Fatal("expected BFS to find a path with no wumpus blocking")
+	_ = BFSStrategy(w, a)
+	if len(a.Plan) == 0 {
+		t.Fatal("expected BFS to compute a non-empty plan with no wumpus blocking")
 	}
+	// First call may have triggered the branch-decision animation
+	// (entrance at (1,0) has multiple walkable neighbors). Step
+	// past it by clearing the animation and calling again.
+	a.SearchAnim = nil
 	if len(a.Plan) > 0 {
 		_ = BFSStrategy(w, a)
 	}
@@ -162,10 +190,11 @@ func TestDFSStrategy_AllBranches(t *testing.T) {
 	killAllWumpus(w)
 	a := world.SpawnAgentForTest(w, '3')
 	a.Water = 1
-	first := DFSStrategy(w, a)
-	if first == a.Pos {
-		t.Fatal("expected DFS to find a path with no wumpus blocking")
+	_ = DFSStrategy(w, a)
+	if len(a.Plan) == 0 {
+		t.Fatal("expected DFS to compute a non-empty plan with no wumpus blocking")
 	}
+	a.SearchAnim = nil
 	if len(a.Plan) > 0 {
 		_ = DFSStrategy(w, a)
 	}

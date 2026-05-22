@@ -148,12 +148,16 @@ func GenerateMaze(rng *rand.Rand) *Maze {
 		}
 	}
 
-	if openField {
-		m.EntrancePos = Pos{1, 1}
-	} else {
-		m.EntrancePos = Pos{0, 0}
+	// EntrancePos: a non-corner perimeter cell. (1, 0) is on the top
+	// edge but not at the (0, 0) corner. Both variants carve a
+	// doorway from this cell inward to ensure connectivity.
+	m.EntrancePos = Pos{1, 0}
+	// Make sure (1, 0) and its inward neighbor are walkable so the
+	// entrance connects to the carved/open interior.
+	m.Cells[0][1] = CellEntrance
+	if m.Cells[1][1] == CellWall {
+		m.Cells[1][1] = CellPath
 	}
-	m.Cells[m.EntrancePos.Y][m.EntrancePos.X] = CellEntrance
 	// Goal placement: uniformly random walkable cell at Manhattan
 	// distance ≥ MinGoalDistanceCells from the entrance. Falls back
 	// to the diametric corner if (somehow) no candidate exists.

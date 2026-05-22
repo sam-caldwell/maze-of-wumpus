@@ -16,7 +16,7 @@ lint:
 
 ## test: full suite (unit + integration + e2e) in verbose mode
 test:
-	go test -v ./...
+	go test -failfast -v ./...
 
 ## coverage: produce a cross-package coverage profile and print the per-function summary
 coverage:

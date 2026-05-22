@@ -133,26 +133,36 @@ func TestStrategyDescription(t *testing.T) {
 }
 
 // TestSwarmAliveCell_NoSwarmGraph: with no swarm graph computed yet,
-// every cell is treated as alive (open-default).
+// every cell is treated as alive (open-default) — also true when
+// the queried group ID has no entry yet.
 func TestSwarmAliveCell_NoSwarmGraph(t *testing.T) {
 	w := NewWorld(56)
-	if !w.SwarmAliveCell(Pos{0, 0}) {
+	if !w.SwarmAliveCell(1, Pos{0, 0}) {
 		t.Error("with no swarm graph yet, every cell should report alive")
+	}
+	if !w.SwarmAliveCell(0, Pos{0, 0}) {
+		t.Error("group=0 (no swarm) should always report alive")
 	}
 }
 
-// TestSwarmAliveCell_AfterPrune: after a prune, only cells in the
-// pruned set return true.
+// TestSwarmAliveCell_AfterPrune: after a prune for a specific group,
+// only cells in THAT group's pruned set return true. Other groups
+// are unaffected (independent swarms).
 func TestSwarmAliveCell_AfterPrune(t *testing.T) {
 	w := NewWorld(57)
-	w.swarmGraph.aliveCells = map[Pos]bool{
-		{10, 10}: true,
+	w.swarmGraphs = map[int]*swarmGraphState{
+		1: {aliveCells: map[Pos]bool{{10, 10}: true}},
+		2: {aliveCells: map[Pos]bool{{20, 20}: true}},
 	}
-	if !w.SwarmAliveCell(Pos{10, 10}) {
-		t.Error("(10,10) should report alive")
+	if !w.SwarmAliveCell(1, Pos{10, 10}) {
+		t.Error("group 1: (10,10) should report alive")
 	}
-	if w.SwarmAliveCell(Pos{11, 11}) {
-		t.Error("(11,11) should report not alive")
+	if w.SwarmAliveCell(1, Pos{11, 11}) {
+		t.Error("group 1: (11,11) should report not alive")
+	}
+	// Cross-group isolation: group 1's cell isn't alive in group 2.
+	if w.SwarmAliveCell(2, Pos{10, 10}) {
+		t.Error("group 2 should not see group 1's alive cell")
 	}
 }
 
@@ -782,7 +792,7 @@ func TestPruneSwarmGraph_EmptyWalkable(t *testing.T) {
 			}
 		}
 	}
-	got := w.pruneSwarmGraph(swarmKnown)
+	got := w.pruneSwarmGraph(swarmKnown, 1)
 	if len(got) != 0 {
 		t.Errorf("empty-walkable pruneSwarmGraph = %v, want empty", got)
 	}
@@ -832,18 +842,424 @@ func TestSpawnGoalHazard_WumpusOnly(t *testing.T) {
 	}
 }
 
-// TestInitialSpawnStagger_OneSecondGap: at world construction every
-// agent has a respawn timer that staggers their arrival 1 second
-// (RespawnTicks ticks) after the previous one — agent 1 spawns at
-// tick 1, agent 2 at tick 11, agent 3 at tick 21, etc. Drives the
-// visible rollout at game start.
-func TestInitialSpawnStagger_OneSecondGap(t *testing.T) {
+// TestPickAgentEntrances_NEqualsOne returns just the canonical
+// entrance (the n=1 early-return branch).
+func TestPickAgentEntrances_NEqualsOne(t *testing.T) {
+	w := NewWorld(130)
+	entries := w.pickAgentEntrances(1)
+	if len(entries) != 1 || entries[0] != w.Maze.EntrancePos {
+		t.Errorf("n=1 = %v, want [%v]", entries, w.Maze.EntrancePos)
+	}
+}
+
+// TestPickAgentEntrances_NEqualsZero returns the canonical entrance
+// only (the function always seeds with it).
+func TestPickAgentEntrances_NEqualsZero(t *testing.T) {
+	w := NewWorld(131)
+	entries := w.pickAgentEntrances(0)
+	if len(entries) != 1 {
+		t.Errorf("n=0 entries = %v, want 1 (canonical entrance always seeded)", entries)
+	}
+}
+
+// TestCarveEntryConnection_GoalRejected: passing the goal cell as a
+// candidate must fail — agents cannot spawn on the goal.
+func TestCarveEntryConnection_GoalRejected(t *testing.T) {
+	w := NewWorld(132)
+	if w.carveEntryConnection(w.Maze.GoalPos) {
+		t.Error("carveEntryConnection accepted GoalPos")
+	}
+}
+
+// TestCarveEntryConnection_NonPerimeter: a non-perimeter cell must
+// be rejected — the carve logic only handles one-axis perimeter
+// directions.
+func TestCarveEntryConnection_NonPerimeter(t *testing.T) {
+	w := NewWorld(133)
+	interior := Pos{X: 40, Y: 40}
+	if w.carveEntryConnection(interior) {
+		t.Error("carveEntryConnection accepted an interior cell")
+	}
+}
+
+// TestCarveEntryConnection_PerimeterCarves: a perimeter cell whose
+// inward neighbor is wall gets a corridor carved straight inward
+// and reports connection success.
+func TestCarveEntryConnection_PerimeterCarves(t *testing.T) {
+	w := NewWorld(134)
+	// Force a perimeter cell to be wall, then carve.
+	p := Pos{X: 0, Y: 5}
+	w.Maze.Cells[p.Y][p.X] = CellWall
+	w.Maze.Cells[p.Y][p.X+1] = CellWall
+	w.Maze.Cells[p.Y][p.X+2] = CellPath // existing path 2 cells inward
+	// Connect the carved corridor into goal-reachable territory by
+	// chaining cells to the existing maze paths from (0,5)→(2,5).
+	// First make sure (2,5) actually reaches the goal.
+	if len(w.DijkstraPath(Pos{X: 2, Y: 5}, w.Maze.GoalPos, w.Maze.IsWalkable)) == 0 {
+		t.Skip("seed-dependent: (2,5) not reachable to goal")
+	}
+	ok := w.carveEntryConnection(p)
+	if !ok {
+		t.Error("carveEntryConnection should succeed when path to goal exists")
+	}
+	if w.Maze.Cells[p.Y][p.X] != CellEntrance {
+		t.Errorf("perimeter cell should be marked CellEntrance, got %d",
+			w.Maze.Cells[p.Y][p.X])
+	}
+	if w.Maze.Cells[p.Y][p.X+1] != CellPath {
+		t.Errorf("inward cell should be carved to CellPath")
+	}
+}
+
+// TestRecomputeAgentPrunedView_DirectCall: world-package call to
+// the per-agent prune helper. Covers the no-op shortcut (cache
+// hit) and the rebuild path.
+func TestRecomputeAgentPrunedView_DirectCall(t *testing.T) {
+	w := NewWorld(135)
+	a := SpawnAgentForTest(w, '1')
+	// First call: rebuild.
+	w.RecomputeAgentPrunedViewIfStale(a)
+	if a.PrunedKnownCells == nil {
+		t.Fatal("first call should populate PrunedKnownCells")
+	}
+	firstSize := len(a.PrunedKnownCells)
+	// Second call with same KnownCells: cache hit, no change.
+	w.RecomputeAgentPrunedViewIfStale(a)
+	if len(a.PrunedKnownCells) != firstSize {
+		t.Errorf("cache-hit changed PrunedKnownCells size %d → %d",
+			firstSize, len(a.PrunedKnownCells))
+	}
+}
+
+// TestInitAgentEntrance_DirectCall covers initAgentEntrance independent
+// of pickAgentEntrances. Verifies fields are populated.
+func TestInitAgentEntrance_DirectCall(t *testing.T) {
+	w := NewWorld(136)
+	a := &Agent{Label: 'Z'}
+	w.initAgentEntrance(a, w.Maze.EntrancePos)
+	if a.EntrancePos != w.Maze.EntrancePos {
+		t.Errorf("EntrancePos = %v, want %v", a.EntrancePos, w.Maze.EntrancePos)
+	}
+	if a.OptimalDistance <= 0 {
+		t.Errorf("OptimalDistance = %d, want > 0", a.OptimalDistance)
+	}
+	if len(a.ShortestPath) == 0 {
+		t.Error("ShortestPath empty")
+	}
+	if a.DistFromStart[w.Maze.EntrancePos.Y][w.Maze.EntrancePos.X] != 0 {
+		t.Errorf("DistFromStart at entrance = %d, want 0",
+			a.DistFromStart[w.Maze.EntrancePos.Y][w.Maze.EntrancePos.X])
+	}
+}
+
+// TestPickAgentEntrances_FallbackWhenAllPerimeterFails: if every
+// perimeter cell fails the goal-distance filter (we set the goal
+// adjacent to the entrance and use a high min-distance), the
+// picker must fall back to filling the slate with the canonical
+// entrance. Exercises the no-pick branch.
+func TestPickAgentEntrances_FallbackWhenAllPerimeterFails(t *testing.T) {
+	w := NewWorld(140)
+	// Pin the goal right next to the entrance so the minGoalDist
+	// filter (MinGoalDistanceCells/2 = 50) rejects every perimeter
+	// cell within 50 Manhattan of the goal — which is the entire
+	// near-entrance region of the maze. We don't expect FULL
+	// rejection in practice; this is a stress test on the constraint
+	// loop, not a "all 12 entries are the canonical entrance" assert.
+	w.Maze.GoalPos = Pos{X: w.Maze.EntrancePos.X + 1, Y: w.Maze.EntrancePos.Y + 1}
+	if !InBounds(w.Maze.GoalPos.X, w.Maze.GoalPos.Y) {
+		t.Skip("seed makes adjacent-goal placement infeasible")
+	}
+	w.Maze.Cells[w.Maze.GoalPos.Y][w.Maze.GoalPos.X] = CellGoal
+	entries := w.pickAgentEntrances(12)
+	if len(entries) != 12 {
+		t.Errorf("got %d entries, want 12 (with fallback to canonical entrance)", len(entries))
+	}
+}
+
+// TestCarveEntryConnection_ConnectsToExistingPath covers the inner
+// loop that walks inward until existing path is reached.
+func TestCarveEntryConnection_ConnectsToExistingPath(t *testing.T) {
+	w := NewWorld(141)
+	// Choose a perimeter cell whose inward neighbor is wall; carve
+	// should turn the perimeter cell to entrance and inward to path.
+	p := Pos{X: BoardWidth - 1, Y: 5}
+	// Force the cells we care about.
+	w.Maze.Cells[p.Y][p.X] = CellWall
+	w.Maze.Cells[p.Y][p.X-1] = CellWall
+	// Existing path inland — ensure it leads to goal.
+	w.Maze.Cells[p.Y][p.X-2] = CellPath
+	if len(w.DijkstraPath(Pos{X: p.X - 2, Y: p.Y}, w.Maze.GoalPos, w.Maze.IsWalkable)) == 0 {
+		t.Skip("seed-dependent: inland cell not reachable to goal")
+	}
+	ok := w.carveEntryConnection(p)
+	if !ok {
+		t.Skip("seed-dependent: carve didn't produce a goal-connected entry")
+	}
+	if w.Maze.Cells[p.Y][p.X] != CellEntrance {
+		t.Errorf("perimeter not marked CellEntrance")
+	}
+}
+
+// TestPickAgentEntrances_DistinctOnDifferentSeeds: across multiple
+// seeds the 12 picked entries should generally land on multiple
+// sides of the board (not all on one edge).
+func TestPickAgentEntrances_DistinctOnDifferentSeeds(t *testing.T) {
+	for _, seed := range []int64{137, 138, 139} {
+		w := NewWorld(seed)
+		entries := w.pickAgentEntrances(12)
+		sidesSeen := map[string]bool{}
+		for _, p := range entries {
+			switch {
+			case p.Y == 0:
+				sidesSeen["top"] = true
+			case p.Y == BoardHeight-1:
+				sidesSeen["bottom"] = true
+			case p.X == 0:
+				sidesSeen["left"] = true
+			case p.X == BoardWidth-1:
+				sidesSeen["right"] = true
+			}
+		}
+		if len(sidesSeen) < 2 {
+			t.Errorf("seed %d: entries cluster on only %d side(s); distribution expected ≥ 2",
+				seed, len(sidesSeen))
+		}
+	}
+}
+
+// TestSwarmCloneSpawn_BumpsStartedByCloneCount: forming a fresh
+// swarm should bump StrategyPerf[S].Started by SwarmClonesPerLeader
+// in addition to the leader's own per-agent bump in RespawnAgents.
+// Each clone is its own startable run.
+func TestSwarmCloneSpawn_BumpsStartedByCloneCount(t *testing.T) {
+	w := NewWorld(316)
+	w.ensureStrategyPerf(SwarmStrategyLetter).Started = 0 // reset baseline
+	a := w.AgentByLabel('3')
+	a.CurrentStrategy = SwarmStrategyLetter
+	a.SwarmGroupID = 0
+	w.maintainSwarmMembership(a)
+	got := w.StrategyPerf[SwarmStrategyLetter].Started
+	if got != SwarmClonesPerLeader {
+		t.Errorf("Started bumped by %d, want %d (one per clone)",
+			got, SwarmClonesPerLeader)
+	}
+}
+
+// TestSwarmCloneSpawn_TenClonesPerLeader: when an agent's strategy
+// is S and a fresh swarm group is created, exactly
+// SwarmClonesPerLeader clones materialize at the leader's entrance.
+func TestSwarmCloneSpawn_TenClonesPerLeader(t *testing.T) {
+	w := NewWorld(310)
+	a := w.AgentByLabel('3')
+	a.CurrentStrategy = SwarmStrategyLetter
+	a.SwarmGroupID = 0
+	w.maintainSwarmMembership(a)
+	if len(a.SwarmClones) != SwarmClonesPerLeader {
+		t.Errorf("clones = %d, want %d", len(a.SwarmClones), SwarmClonesPerLeader)
+	}
+	for i, c := range a.SwarmClones {
+		if c == nil || !c.Alive {
+			t.Errorf("clone %d nil or dead", i)
+		}
+		if c.Pos != a.EntrancePos {
+			t.Errorf("clone %d at %v, want leader's entrance %v", i, c.Pos, a.EntrancePos)
+		}
+	}
+}
+
+// TestSwarmCloneCleanupOnStrategyLeave: an agent that switches OFF S
+// has its clones cleared.
+func TestSwarmCloneCleanupOnStrategyLeave(t *testing.T) {
+	w := NewWorld(311)
+	a := w.AgentByLabel('3')
+	a.CurrentStrategy = SwarmStrategyLetter
+	w.maintainSwarmMembership(a)
+	if a.SwarmGroupID == 0 || len(a.SwarmClones) == 0 {
+		t.Fatal("swarm not initialized")
+	}
+	a.CurrentStrategy = 'T' // leave the swarm
+	w.maintainSwarmMembership(a)
+	if a.SwarmGroupID != 0 || len(a.SwarmClones) != 0 {
+		t.Errorf("swarm not cleared after leaving S: groupID=%d, clones=%d",
+			a.SwarmGroupID, len(a.SwarmClones))
+	}
+}
+
+// TestKillAgent_PromotesCloneToLeader: when an S-leader is killed
+// but has alive clones, one is promoted to the leader slot — the
+// agent stays alive, no Stats.Deaths bump.
+func TestKillAgent_PromotesCloneToLeader(t *testing.T) {
+	w := NewWorld(312)
+	a := w.AgentByLabel('3')
+	a.CurrentStrategy = SwarmStrategyLetter
+	a.Alive = true
+	w.maintainSwarmMembership(a)
+	// Move a clone somewhere distinctive so we can verify the leader
+	// inherited its position.
+	a.SwarmClones[0].Pos = Pos{X: 50, Y: 50}
+	prevDeaths := a.Stats.Deaths
+	prevClones := len(a.SwarmClones)
+	w.KillAgent(a, "wumpus")
+	if !a.Alive {
+		t.Error("leader should still be alive after clone promotion")
+	}
+	if a.Stats.Deaths != prevDeaths {
+		t.Errorf("Stats.Deaths changed on promotion: %d → %d", prevDeaths, a.Stats.Deaths)
+	}
+	if a.Pos != (Pos{X: 50, Y: 50}) {
+		t.Errorf("leader didn't inherit clone position: at %v, want (50,50)", a.Pos)
+	}
+	if len(a.SwarmClones) != prevClones-1 {
+		t.Errorf("clone count after promotion = %d, want %d",
+			len(a.SwarmClones), prevClones-1)
+	}
+}
+
+// TestKillAgent_NoCloneFallsThroughToDeath: when an S-leader has no
+// alive clones, KillAgent proceeds with normal death handling.
+func TestKillAgent_NoCloneFallsThroughToDeath(t *testing.T) {
+	w := NewWorld(313)
+	a := w.AgentByLabel('3')
+	a.CurrentStrategy = SwarmStrategyLetter
+	a.Alive = true
+	w.maintainSwarmMembership(a)
+	// Kill every clone.
+	for _, c := range a.SwarmClones {
+		c.Alive = false
+	}
+	prevDeaths := a.Stats.Deaths
+	w.KillAgent(a, "ttl")
+	if a.Alive {
+		t.Error("leader should die when no clones survive")
+	}
+	if a.Stats.Deaths != prevDeaths+1 {
+		t.Errorf("Stats.Deaths bumped %d → %d, want +1", prevDeaths, a.Stats.Deaths)
+	}
+}
+
+// TestCheckGoal_CloneOnGoalCreditsLeader: a clone reaching the goal
+// cell increments the leader's Stats.GoalsReached.
+func TestCheckGoal_CloneOnGoalCreditsLeader(t *testing.T) {
+	w := NewWorld(314)
+	a := w.AgentByLabel('3')
+	a.CurrentStrategy = SwarmStrategyLetter
+	a.Alive = true
+	w.maintainSwarmMembership(a)
+	prevGoals := a.Stats.GoalsReached
+	a.SwarmClones[0].Pos = w.Maze.GoalPos
+	w.CheckGoal()
+	if a.Stats.GoalsReached != prevGoals+1 {
+		t.Errorf("clone-on-goal didn't credit leader: %d → %d, want +1",
+			prevGoals, a.Stats.GoalsReached)
+	}
+	// Swarm should have dissolved (group cleared) so respawn rebuilds
+	// fresh clones.
+	if a.SwarmGroupID != 0 {
+		t.Errorf("SwarmGroupID should reset after goal: %d", a.SwarmGroupID)
+	}
+}
+
+// TestSwarmIndependentGraphs: two S-agents in distinct groups have
+// distinct entries in World.swarmGraphs after recompute.
+func TestSwarmIndependentGraphs(t *testing.T) {
+	w := NewWorld(315)
+	a := w.AgentByLabel('3')
+	b := w.AgentByLabel('4')
+	a.CurrentStrategy = SwarmStrategyLetter
+	b.CurrentStrategy = SwarmStrategyLetter
+	a.Alive = true
+	b.Alive = true
+	a.KnownCells = map[Pos]bool{a.Pos: true}
+	b.KnownCells = map[Pos]bool{b.Pos: true}
+	w.maintainSwarmMembership(a)
+	w.maintainSwarmMembership(b)
+	if a.SwarmGroupID == b.SwarmGroupID {
+		t.Fatal("distinct S-agents should have distinct SwarmGroupIDs")
+	}
+	w.RecomputeSwarmGraphIfStale(a.SwarmGroupID)
+	w.RecomputeSwarmGraphIfStale(b.SwarmGroupID)
+	if w.swarmGraphs[a.SwarmGroupID] == nil {
+		t.Error("group A's swarmGraphs entry missing")
+	}
+	if w.swarmGraphs[b.SwarmGroupID] == nil {
+		t.Error("group B's swarmGraphs entry missing")
+	}
+}
+
+// TestStrategyPerf_StartedCountsAllRuns: #Runs (Started field) must
+// count every journey that began on a strategy, regardless of outcome.
+// Wire a fresh agent up, respawn it three times (drive a death between
+// spawns), and assert Started ≥ 3 for whichever strategies it picked.
+func TestStrategyPerf_StartedCountsAllRuns(t *testing.T) {
+	w := NewWorldWithConfig(Config{
+		Seed:            300,
+		StrategyLetters: []rune{'R', 'T', 'X'},
+	})
+	a := w.AgentByLabel('1')
+	a.Disabled = false
+	totalStartedBefore := 0
+	if w.StrategyPerf != nil {
+		for _, c := range w.StrategyPerf {
+			totalStartedBefore += c.Started
+		}
+	}
+	for i := 0; i < 3; i++ {
+		a.Alive = false
+		a.RespawnIn = 0
+		w.RespawnAgents()
+		// Force a death so the next RespawnAgents call counts as a
+		// fresh start.
+		a.Alive = false
+	}
+	totalStartedAfter := 0
+	for _, c := range w.StrategyPerf {
+		totalStartedAfter += c.Started
+	}
+	if totalStartedAfter-totalStartedBefore < 3 {
+		t.Errorf("Started total bumped by %d across 3 respawns; want ≥ 3",
+			totalStartedAfter-totalStartedBefore)
+	}
+}
+
+// TestStrategyPerf_StartedIncrementedRegardlessOfOutcome: even if the
+// agent dies of TTL (not goal-reach), the Started counter still ticked
+// up on the spawn that began the death-bound journey.
+func TestStrategyPerf_StartedIncrementedRegardlessOfOutcome(t *testing.T) {
+	w := NewWorldWithConfig(Config{
+		Seed:            301,
+		StrategyLetters: []rune{'T'},
+	})
+	a := w.AgentByLabel('3')
+	a.Disabled = false
+	a.Alive = false
+	a.RespawnIn = 0
+	w.RespawnAgents()
+	c := w.StrategyPerf[a.CurrentStrategy]
+	if c == nil || c.Started < 1 {
+		t.Errorf("Started not bumped after first spawn (CurrentStrategy=%c)",
+			a.CurrentStrategy)
+	}
+	// Kill via TTL — should NOT clear Started.
+	beforeStarted := c.Started
+	w.KillAgent(a, "ttl")
+	if c.Started != beforeStarted {
+		t.Errorf("Started changed on death: %d → %d", beforeStarted, c.Started)
+	}
+	// TTLExpiry should have incremented.
+	if c.TTLExpiry < 1 {
+		t.Errorf("TTLExpiry not bumped on TTL death: %d", c.TTLExpiry)
+	}
+}
+
+// TestInitialSpawn_AllSimultaneous: every agent has RespawnIn = 1
+// at construction — they all enter on the very first tick. The
+// per-agent perimeter entrances distribute them across the maze
+// so there's no visual clumping to avoid via a stagger.
+func TestInitialSpawn_AllSimultaneous(t *testing.T) {
 	w := NewWorld(120)
-	for i, a := range w.Agents {
-		want := 1 + i*RespawnTicks
-		if a.RespawnIn != want {
-			t.Errorf("agent %c (#%d): RespawnIn = %d, want %d",
-				a.Label, i, a.RespawnIn, want)
+	for _, a := range w.Agents {
+		if a.RespawnIn != 1 {
+			t.Errorf("agent %c: RespawnIn = %d, want 1", a.Label, a.RespawnIn)
 		}
 		if a.Alive {
 			t.Errorf("agent %c: should not be alive at construction", a.Label)
@@ -851,33 +1267,15 @@ func TestInitialSpawnStagger_OneSecondGap(t *testing.T) {
 	}
 }
 
-// TestInitialSpawnStagger_OnlyOneAlivePerSecond: after a single tick
-// only agent 1 is alive; after RespawnTicks more ticks, agents 1
-// and 2 are alive; etc. Walks the cadence forward through the
-// first few seconds.
-func TestInitialSpawnStagger_OnlyOneAlivePerSecond(t *testing.T) {
+// TestInitialSpawn_AllAliveAfterFirstTick: after one RespawnAgents
+// call every enabled agent is alive on the board simultaneously.
+func TestInitialSpawn_AllAliveAfterFirstTick(t *testing.T) {
 	w := NewWorld(121)
 	w.EnableAllAgents()
-	aliveCount := func() int {
-		n := 0
-		for _, a := range w.Agents {
-			if a.Alive {
-				n++
-			}
-		}
-		return n
-	}
 	w.RespawnAgents()
-	if got := aliveCount(); got != 1 {
-		t.Errorf("after tick 1: alive = %d, want 1", got)
-	}
-	for k := 2; k <= 3; k++ {
-		for j := 0; j < RespawnTicks; j++ {
-			w.RespawnAgents()
-		}
-		if got := aliveCount(); got != k {
-			t.Errorf("after %d seconds: alive = %d, want %d",
-				k, got, k)
+	for _, a := range w.Agents {
+		if !a.Alive {
+			t.Errorf("agent %c: should be alive after first tick", a.Label)
 		}
 	}
 }

@@ -157,8 +157,10 @@ func TestMergeSwarmKnowledge_NilSidesAndBeliefMaps(t *testing.T) {
 	peer := world.SpawnAgentForTest(w, '4')
 	a.CurrentStrategy = StrategySwarmBayesian
 	peer.CurrentStrategy = StrategySwarmBayesian
-	a.KnownCells = nil  // exercise nil-init
-	a.Beliefs = nil     // exercise nil-init
+	a.SwarmGroupID = 1
+	peer.SwarmGroupID = 1
+	a.KnownCells = nil // exercise nil-init
+	a.Beliefs = nil    // exercise nil-init
 	peer.KnownCells = map[world.Pos]bool{{X: 10, Y: 10}: true}
 	peer.Beliefs = world.NewAgentBeliefs()
 	peer.Beliefs.Observed[world.Pos{X: 10, Y: 10}] = true
@@ -191,6 +193,8 @@ func TestMergeSwarmKnowledge_PeerBeliefsNilSkipped(t *testing.T) {
 	peer := world.SpawnAgentForTest(w, '4')
 	a.CurrentStrategy = StrategySwarmBayesian
 	peer.CurrentStrategy = StrategySwarmBayesian
+	a.SwarmGroupID = 1
+	peer.SwarmGroupID = 1
 	a.Beliefs = world.NewAgentBeliefs()
 	peer.KnownCells = map[world.Pos]bool{{X: 20, Y: 20}: true}
 	peer.Beliefs = nil // exercise the continue branch
@@ -208,6 +212,8 @@ func TestMergeSwarmKnowledge_DeadPeerSkipped(t *testing.T) {
 	peer := world.SpawnAgentForTest(w, '4')
 	a.CurrentStrategy = StrategySwarmBayesian
 	peer.CurrentStrategy = StrategySwarmBayesian
+	a.SwarmGroupID = 1
+	peer.SwarmGroupID = 1
 	peer.Alive = false // exercise the continue branch
 	peer.KnownCells = map[world.Pos]bool{{X: 30, Y: 30}: true}
 	a.KnownCells = map[world.Pos]bool{}
@@ -404,6 +410,62 @@ func TestSoloPrune_PreservesPOForW_NoGoalLeak(t *testing.T) {
 	got := POMCPStrategy(w, a)
 	if got == w.Maze.GoalPos && got != a.Pos {
 		t.Errorf("strict-PO violation: W jumped to GoalPos %v without perceiving it", got)
+	}
+}
+
+// TestScentFollower_LostScentFallsBackToBayesian: when no cardinal
+// neighbor carries the trustee's scent, the strategy must defer to
+// the Bayesian planner (which can navigate to the goal if perceived
+// or expand the perception frontier) rather than the weak outward-
+// bias fallback. We verify by setting the goal cell INTO KnownCells
+// and confirming the agent steps toward it — outwardBias would just
+// pick the highest DistFromStart neighbor regardless of goal.
+func TestScentFollower_LostScentFallsBackToBayesian(t *testing.T) {
+	w := newConfiguredWorld(620)
+	a := world.SpawnAgentForTest(w, '4')
+	a.CurrentStrategy = StrategyScentFollower
+	a.CurrentTrustee = '2'
+	a.Beliefs = world.NewAgentBeliefs()
+	// Carve a 3-cell corridor: agent at (10,10), middle at (11,10),
+	// goal at (12,10). All three perceived (KnownCells), middle
+	// marked safe.
+	w.AgentAt[a.Pos.Y][a.Pos.X] = nil
+	a.Pos = world.Pos{X: 10, Y: 10}
+	w.AgentAt[10][10] = a
+	w.Maze.Cells[10][10] = world.CellPath
+	w.Maze.Cells[10][11] = world.CellPath
+	w.Maze.Cells[10][12] = world.CellGoal
+	w.Maze.GoalPos = world.Pos{X: 12, Y: 10}
+	a.KnownCells = map[world.Pos]bool{
+		{X: 10, Y: 10}: true, {X: 11, Y: 10}: true, {X: 12, Y: 10}: true,
+	}
+	a.Beliefs.SafeFromPit[world.Pos{X: 11, Y: 10}] = true
+	a.Beliefs.SafeFromPit[world.Pos{X: 12, Y: 10}] = true
+	// No scent anywhere on the board.
+	got := ScentFollowerStrategy(w, a)
+	if got != (world.Pos{X: 11, Y: 10}) {
+		t.Errorf("lost-scent fallback should plan toward perceived goal; got %v, want (11,10)", got)
+	}
+}
+
+// TestScentFollower_LostScentExploresWhenGoalUnperceived: same
+// scenario without GoalPos in KnownCells — Bayesian fallback should
+// still produce a constructive move (frontier expansion), never
+// freeze at a.Pos.
+func TestScentFollower_LostScentExploresWhenGoalUnperceived(t *testing.T) {
+	w := newConfiguredWorld(621)
+	a := world.SpawnAgentForTest(w, '4')
+	a.CurrentStrategy = StrategyScentFollower
+	a.CurrentTrustee = '2'
+	got := ScentFollowerStrategy(w, a)
+	// Returned cell must be Moore-adjacent to a.Pos (a real move)
+	// OR a.Pos itself if the agent is genuinely surrounded.
+	if got != a.Pos {
+		dx := got.X - a.Pos.X
+		dy := got.Y - a.Pos.Y
+		if dx < -1 || dx > 1 || dy < -1 || dy > 1 {
+			t.Errorf("fallback returned non-neighbor %v from %v", got, a.Pos)
+		}
 	}
 }
 

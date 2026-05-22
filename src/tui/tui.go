@@ -107,7 +107,38 @@ var (
 	scentAGlyph   = scentAStyle.Render("~")
 	scentBGlyph   = scentBStyle.Render("~")
 	scentCGlyph   = scentCStyle.Render("~")
-	entranceGlyph = entranceStyle.Render("S") // 'S' for Start — no longer collides with agent 'E'
+	entranceGlyph = entranceStyle.Render("S") // generic fallback (no per-agent claim)
+
+	// agentEntranceGlyph maps an agent label to a "white agent-rune
+	// on the agent's color background" glyph (e.g., entrance for
+	// agent 1 renders as a white "1" on a blue square). The agent's
+	// own identifier on the doorway makes the home-door of each
+	// agent unmistakable. Built from the same 256-color codes
+	// used by the agent-N styles.
+	agentEntranceColors = map[rune]string{
+		'1': "39",  // bright blue
+		'2': "208", // orange
+		'3': "129", // purple
+		'4': "199", // pink-magenta
+		'5': "46",  // bright green
+		'6': "220", // gold
+		'7': "177", // light purple
+		'8': "51",  // cyan
+		'9': "82",  // mid green
+		'A': "226", // bright yellow
+		'B': "202", // red-orange
+		'C': "99",  // purple-violet
+	}
+	agentEntranceGlyph = func() map[rune]string {
+		out := map[rune]string{}
+		for label, bg := range agentEntranceColors {
+			// Direct ANSI: bold + fg 255 (white) + bg <agent color>.
+			// Bypasses lipgloss color-profile auto-strip so the bg
+			// always renders in test and headless contexts.
+			out[label] = fmt.Sprintf("\x1b[1;38;5;255;48;5;%sm%c\x1b[0m", bg, label)
+		}
+		return out
+	}()
 	stenchGlyph   = stenchStyle.Render("~")
 	heatGlyph     = heatStyle.Render(" ")
 	stenchHeatGl  = stenchOnHeat.Render("~")
@@ -297,10 +328,12 @@ func (m Model) View() string {
 	if m.World.TTLDisabled {
 		ttlState = "OFF"
 	}
+	// TTL is now per-agent (see Agent.OptimalDistance × TTLMultiplier)
+	// — surfaced in the per-agent stats line rather than the global
+	// status bar.
 	b.WriteString(statStyle.Render(
-		fmt.Sprintf("Cycle %5d | TTL %d ×%d | Paths: %s | W killed: %d | wumpus:%s pits:%s ttl:%s\n[q]uit [r]eseed [s]how-path [w]umpus [f]ire/water [t]tl [1..9 a..c] agent",
+		fmt.Sprintf("Cycle %5d | Paths: %s | W killed: %d | wumpus:%s pits:%s ttl:%s\n[q]uit [r]eseed [s]how-path [w]umpus [f]ire/water [t]tl [1..9 a..c] agent",
 			m.World.Cycle,
-			world.TTLMultiplier*m.World.Stats.OptimalDistance, world.TTLMultiplier,
 			pathsStr, m.World.Stats.WumpusDied,
 			wumpState, pitState, ttlState),
 	))
@@ -355,13 +388,18 @@ func (m Model) formatAgentStats(a *world.Agent) string {
 	if !a.Alive {
 		alive = "dead    "
 	}
+	// Per-agent TTL ceiling = TTLMultiplier × the agent's own
+	// EntrancePos→GoalPos shortest path. Used both for the dist
+	// color-severity heuristic and as a printed column.
+	agentTTL := world.TTLMultiplier * a.OptimalDistance
 	distText := fmt.Sprintf("dist:%04d", a.Stats.ActualDistance)
-	switch distSeverity(a.Stats.ActualDistance, world.TTLMultiplier*m.World.Stats.OptimalDistance) {
+	switch distSeverity(a.Stats.ActualDistance, agentTTL) {
 	case 2:
 		distText = ttlDangerStyle.Render(distText)
 	case 1:
 		distText = ttlWarnStyle.Render(distText)
 	}
+	agentTTLText := fmt.Sprintf("TTL:%04d", agentTTL)
 	lastText := fmt.Sprintf("%04d", a.Stats.LastSolveTime)
 	switch lastSolveTier(a.Stats.LastSolveTime, a.Stats.MinSolveTime,
 		int(a.Stats.AvgSolveTime), a.Stats.MaxSolveTime) {
@@ -387,11 +425,11 @@ func (m Model) formatAgentStats(a *world.Agent) string {
 		learnedTTL = fmt.Sprintf("%04d", a.LearnedTTL)
 	}
 	return fmt.Sprintf(
-		" %c %s str:%s s:%03d f:%s ttl:%s d:%03d k:%03d g:%03d %s best:%04d/%04d t[min/avg/max/last]:%04d/%07.1f/%04d/%s score:%.5f",
+		" %c %s str:%s s:%03d f:%s ttl:%s d:%03d k:%03d g:%03d %s %s best:%04d/%04d t[min/avg/max/last]:%04d/%07.1f/%04d/%s score:%.5f",
 		a.Label, alive, strLetter,
 		a.Stats.Starts, following, learnedTTL,
 		a.Stats.Deaths, a.Stats.WumpusKilled, a.Stats.GoalsReached,
-		distText,
+		distText, agentTTLText,
 		a.Stats.BestSolveDistance, a.Stats.BestSolveTime,
 		a.Stats.MinSolveTime, a.Stats.AvgSolveTime, a.Stats.MaxSolveTime, lastText,
 		a.Stats.Score(m.World.Cycle),
@@ -417,6 +455,40 @@ func cellIsGhost(w *world.World, x, y int) bool {
 		}
 	}
 	return false
+}
+
+// swarmCloneGlyph maps an agent label to a "white * on the agent's
+// color background" glyph. Used to render every swarm clone with a
+// generic asterisk in its leader's identity color so the swarm
+// reads at a glance as a coherent unit on the map without the
+// glyph clashing with the leader's labeled glyph.
+var swarmCloneGlyph = func() map[rune]string {
+	out := map[rune]string{}
+	for label, bg := range agentEntranceColors {
+		out[label] = fmt.Sprintf("\x1b[1;38;5;255;48;5;%sm*\x1b[0m", bg)
+	}
+	return out
+}()
+
+// cellHasSwarmClone returns the owning leader's label and true if
+// any alive swarm clone occupies cell (x, y). Linear-scan over the
+// 12 agent slots × ≤10 clones per agent — at most 120 checks per
+// cell. Acceptable for first-cut TUI rendering.
+func cellHasSwarmClone(w *world.World, x, y int) (rune, bool) {
+	for _, leader := range w.Agents {
+		if leader.SwarmGroupID == 0 || len(leader.SwarmClones) == 0 {
+			continue
+		}
+		for _, c := range leader.SwarmClones {
+			if c == nil || !c.Alive {
+				continue
+			}
+			if c.Pos.X == x && c.Pos.Y == y {
+				return leader.Label, true
+			}
+		}
+	}
+	return 0, false
 }
 
 func (m Model) glyphAt(w *world.World, x, y int) string {
@@ -453,6 +525,16 @@ func (m Model) glyphAt(w *world.World, x, y int) string {
 			return wumpusGlyph
 		}
 	}
+	// Swarm clones: each alive clone renders as a white "*" on the
+	// leader's color background. Layered below leader-agent and
+	// wumpus glyphs so a leader standing on a clone's tile shows
+	// the leader; layered above terrain glyphs so the swarm trail
+	// is visible against walls/path/pits.
+	if leaderLabel, ok := cellHasSwarmClone(w, x, y); ok {
+		if g := swarmCloneGlyph[leaderLabel]; g != "" {
+			return g
+		}
+	}
 	// Branch-animation ghosts (red) overlay everything below this
 	// point, so the agent and wumpus glyphs above still win.
 	if cellIsGhost(w, x, y) {
@@ -475,6 +557,17 @@ func (m Model) glyphAt(w *world.World, x, y int) string {
 	case world.CellGoal:
 		return goalGlyph
 	case world.CellEntrance:
+		// Prefer the per-agent entrance glyph (white "S" on the
+		// agent's color background). Falls back to the generic
+		// cyan "S" when no agent claims this cell.
+		pos := world.Pos{X: x, Y: y}
+		for _, a := range w.Agents {
+			if a.EntrancePos == pos {
+				if g, ok := agentEntranceGlyph[a.Label]; ok {
+					return g
+				}
+			}
+		}
 		return entranceGlyph
 	}
 	heat := w.HeatAt(x, y)

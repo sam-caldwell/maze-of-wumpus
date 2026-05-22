@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -126,6 +127,70 @@ func TestTrustColorIdx_AllBranches(t *testing.T) {
 	}
 	if got := trustColorIdx(TrustHeatCap / 2); got < 5 || got > 10 {
 		t.Errorf("half-cap score = %d, want ~7", got)
+	}
+}
+
+// TestGlyphAt_AgentEntrancePerColor: when an agent's perimeter
+// entrance is rendered, the glyph carries that agent's per-label
+// background color and the agent's own identifier rune (e.g., "1")
+// as the foreground character.
+func TestGlyphAt_AgentEntrancePerColor(t *testing.T) {
+	m := NewModel(108, world.NewWorld)
+	a := m.World.AgentByLabel('1')
+	if a == nil {
+		t.Skip("agent 1 missing")
+	}
+	got := m.glyphAt(m.World, a.EntrancePos.X, a.EntrancePos.Y)
+	if got == entranceGlyph {
+		t.Errorf("agent 1's entrance rendered with generic glyph instead of per-agent")
+	}
+	// Must contain "48;5;39" (the bg color clause).
+	if !strings.Contains(got, "48;5;39") {
+		t.Errorf("agent 1's entrance glyph missing bg color 39: %q", got)
+	}
+	// Must contain the agent's own label rune ("1"), NOT "S".
+	if !strings.Contains(got, "1") {
+		t.Errorf("agent 1's entrance glyph missing label '1': %q", got)
+	}
+	if strings.Contains(got, "S") {
+		t.Errorf("agent 1's entrance glyph still contains stale 'S': %q", got)
+	}
+}
+
+// TestFormatAgentStats_TTLColumnIsPerAgent: two agents with very
+// different OptimalDistance values produce distinct TTL columns.
+func TestFormatAgentStats_TTLColumnIsPerAgent(t *testing.T) {
+	m := NewModel(109, world.NewWorld)
+	a := m.World.AgentByLabel('1')
+	b := m.World.AgentByLabel('2')
+	a.OptimalDistance = 100
+	b.OptimalDistance = 250
+	wantA := fmt.Sprintf("TTL:%04d", world.TTLMultiplier*100)
+	wantB := fmt.Sprintf("TTL:%04d", world.TTLMultiplier*250)
+	if !strings.Contains(m.formatAgentStats(a), wantA) {
+		t.Errorf("agent 1 stats missing %q", wantA)
+	}
+	if !strings.Contains(m.formatAgentStats(b), wantB) {
+		t.Errorf("agent 2 stats missing %q", wantB)
+	}
+}
+
+// TestDistSeverity_PerAgentTTL: distSeverity classifies ActualDistance
+// against the supplied TTL. The formatAgentStats hookup now passes
+// `TTLMultiplier × a.OptimalDistance` (per-agent), so the severity
+// function fires at per-agent ratios — independent of the world-wide
+// Stats.OptimalDistance.
+func TestDistSeverity_PerAgentTTL(t *testing.T) {
+	// Agent with a tight per-agent TTL cap = 50.
+	perAgentCap := world.TTLMultiplier * 10
+	if got := distSeverity(45, perAgentCap); got != 2 {
+		t.Errorf("90%% of per-agent cap should be danger (severity 2), got %d", got)
+	}
+	if got := distSeverity(38, perAgentCap); got != 1 {
+		t.Errorf("76%% of per-agent cap should be warn (severity 1), got %d", got)
+	}
+	if got := distSeverity(20, perAgentCap); got != 0 {
+		t.Errorf("40%% of per-agent cap should be normal (severity 0), got %d", got)
 	}
 }
 

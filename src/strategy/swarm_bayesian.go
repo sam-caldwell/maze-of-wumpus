@@ -43,26 +43,106 @@ import (
 //     pruning replaces it).
 func SwarmBayesianStrategy(w *world.World, a *world.Agent) world.Pos {
 	mergeSwarmKnowledge(w, a)
-	w.RecomputeSwarmGraphIfStale()
+	w.RecomputeSwarmGraphIfStale(a.SwarmGroupID)
 	orig := a.KnownCells
 	pruned := make(map[world.Pos]bool, len(orig))
 	for p := range orig {
-		if w.SwarmAliveCell(p) {
+		if w.SwarmAliveCell(a.SwarmGroupID, p) {
 			pruned[p] = true
 		}
 	}
-	// Always keep a.Pos perceivable so the planner can plan FROM
-	// the agent's current cell even if pruning otherwise dropped it.
+	// Always keep a.Pos AND every clone's Pos perceivable so the
+	// planner can plan FROM any swarm member's current cell even if
+	// pruning otherwise dropped it.
 	pruned[a.Pos] = true
+	for _, c := range a.SwarmClones {
+		if c != nil && c.Alive {
+			pruned[c.Pos] = true
+		}
+	}
 	a.KnownCells = pruned
 	defer func() { a.KnownCells = orig }()
+	// Move every alive clone using the SAME Bayesian planning core
+	// the leader uses, against the SAME shared (now pruned) view.
+	// Each clone is its own goal-seeker: parallel Bayesian agents
+	// pooling state, not 10 dumb followers behind one planner.
+	moveSwarmClones(w, a)
 	return bayesianStrategyPlan(w, a)
 }
 
-// mergeSwarmKnowledge syncs `a` with every other alive agent
-// currently using strategy S. KnownCells is unioned; AgentBeliefs
-// merges Observed/SafeFromPit as unions and PitProb/WumpusProb as
-// element-wise max (cautious-bias preserves safety guarantees).
+// moveSwarmClones advances every alive clone of the swarm by one
+// Bayesian-planned step against the shared (pruned) KnownCells. The
+// leader's Pos/Plan/KnownShortestPath temporarily take over the
+// clone's slots while bayesianStrategyPlan runs, so the existing
+// planner machinery operates from the clone's viewpoint. The leader
+// state is restored before each clone — and again at function exit
+// — so the leader's own planning call (which happens after this
+// returns) sees its real Pos.
+func moveSwarmClones(w *world.World, a *world.Agent) {
+	for _, c := range a.SwarmClones {
+		if c == nil || !c.Alive {
+			continue
+		}
+		moveOneSwarmClone(w, a, c)
+	}
+}
+
+// moveOneSwarmClone plans + commits a Bayesian step for one clone.
+func moveOneSwarmClone(w *world.World, a *world.Agent, c *world.SwarmClone) {
+	origPos := a.Pos
+	origPlan := a.Plan
+	origPath := a.KnownShortestPath
+
+	a.Pos = c.Pos
+	a.Plan = c.Plan
+	a.KnownShortestPath = c.KnownShortestPath
+
+	target := bayesianStrategyPlan(w, a)
+
+	// Save the planner's mutations back to the clone.
+	c.Plan = a.Plan
+	c.KnownShortestPath = a.KnownShortestPath
+
+	// Validate the move against the same predicates an agent uses.
+	// a.Pos is still c.Pos here so CanMoveTo / WumpusAt checks are
+	// relative to the clone's position.
+	moved := false
+	if target != a.Pos && w.CanMoveTo(a, target) {
+		blocked := false
+		if !w.WumpusDisabled {
+			if wm := w.WumpusAt[target.Y][target.X]; wm != nil && wm.Alive {
+				blocked = true
+			}
+		}
+		if !blocked {
+			c.Pos = target
+			moved = true
+		}
+	}
+
+	// Sense from the clone's NEW position so the swarm's shared
+	// KnownCells grows in 11 directions every tick.
+	a.Pos = c.Pos
+	w.MarkAgentSensed(a)
+	if moved {
+		// Drop a scent breadcrumb so scent-aware peers can read the
+		// swarm trail (uses leader's label — the swarm acts as one).
+		w.ScentOwner[c.Pos.Y][c.Pos.X] = a.Label
+		w.ScentCycle[c.Pos.Y][c.Pos.X] = w.Cycle
+	}
+
+	// Restore.
+	a.Pos = origPos
+	a.Plan = origPlan
+	a.KnownShortestPath = origPath
+}
+
+// mergeSwarmKnowledge syncs `a` with every other alive agent in the
+// SAME swarm group (matching SwarmGroupID). Distinct swarms are
+// walled off — an agent on swarm A never reads cells from swarm B's
+// members. KnownCells is unioned; AgentBeliefs merges Observed and
+// SafeFromPit as unions and PitProb/WumpusProb as element-wise max
+// (cautious-bias preserves safety guarantees).
 func mergeSwarmKnowledge(w *world.World, a *world.Agent) {
 	if a.KnownCells == nil {
 		a.KnownCells = map[world.Pos]bool{}
@@ -70,8 +150,14 @@ func mergeSwarmKnowledge(w *world.World, a *world.Agent) {
 	if a.Beliefs == nil {
 		a.Beliefs = world.NewAgentBeliefs()
 	}
+	if a.SwarmGroupID == 0 {
+		return // not in a swarm
+	}
 	for _, peer := range w.Agents {
 		if peer == a || !peer.Alive || peer.CurrentStrategy != StrategySwarmBayesian {
+			continue
+		}
+		if peer.SwarmGroupID != a.SwarmGroupID {
 			continue
 		}
 		for p := range peer.KnownCells {

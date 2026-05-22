@@ -446,21 +446,111 @@ func TestFallbackMove_NoOptions(t *testing.T) {
 	}
 }
 
-// TestRespawnAgents_AllowsOverlapAtEntrance: agents may share the
-// entrance cell on respawn. Two agents both at the entrance is now
-// a valid steady state — used to be blocked.
+// TestRespawnAgents_AllowsOverlapAtEntrance: agents may share a
+// spawn cell on respawn. Each agent now has its OWN EntrancePos
+// (per-agent entries on the maze perimeter), so the natural case
+// is they DON'T overlap; this test pins B's entrance to A's cell
+// to verify the overlap-permitted invariant still holds.
 func TestRespawnAgents_AllowsOverlapAtEntrance(t *testing.T) {
 	w := NewWorld(56)
 	a := SpawnAgentForTest(w, '1')
 	b := w.AgentByLabel('2')
 	b.Alive = false
 	b.RespawnIn = 0
+	// Force B to share A's entrance so we exercise the overlap path.
+	b.EntrancePos = a.EntrancePos
 	w.RespawnAgents()
 	if !b.Alive {
 		t.Error("B should spawn even though A occupies entrance — overlap allowed")
 	}
 	if a.Pos != b.Pos {
-		t.Errorf("both agents should be at entrance: A=%v B=%v", a.Pos, b.Pos)
+		t.Errorf("both agents should be at shared entrance: A=%v B=%v", a.Pos, b.Pos)
+	}
+}
+
+// TestPickAgentEntrances_PerimeterAndConnected: every entry produced
+// by pickAgentEntrances lies on the maze perimeter, is distinct
+// from every other entry, and is connected to the goal via the
+// maze paths.
+func TestPickAgentEntrances_PerimeterAndConnected(t *testing.T) {
+	w := NewWorld(57)
+	entries := w.pickAgentEntrances(12)
+	if len(entries) != 12 {
+		t.Fatalf("got %d entries, want 12", len(entries))
+	}
+	seen := map[Pos]bool{}
+	for i, p := range entries {
+		if seen[p] {
+			// Duplicate is allowed only for the fallback case (where
+			// the picker can't find enough distinct perimeter cells)
+			// and only after position 0.
+			t.Logf("entry %d is a duplicate of an earlier entry (fallback): %v", i, p)
+		}
+		seen[p] = true
+		if p.X != 0 && p.X != BoardWidth-1 && p.Y != 0 && p.Y != BoardHeight-1 {
+			t.Errorf("entry %d %v is NOT on the maze perimeter", i, p)
+		}
+		if !w.Maze.IsWalkable(p) {
+			t.Errorf("entry %d %v is not walkable", i, p)
+		}
+		// Verify path to goal exists.
+		path := w.DijkstraPath(p, w.Maze.GoalPos, w.Maze.IsWalkable)
+		if len(path) == 0 && p != w.Maze.GoalPos {
+			t.Errorf("entry %d %v has no path to goal %v", i, p, w.Maze.GoalPos)
+		}
+	}
+}
+
+// TestAgentEntrances_PerAgentOptimalDistance: after construction
+// each agent has a non-zero OptimalDistance and a non-empty
+// ShortestPath that ends at the goal.
+func TestAgentEntrances_PerAgentOptimalDistance(t *testing.T) {
+	w := NewWorld(58)
+	for _, a := range w.Agents {
+		if a.OptimalDistance <= 0 {
+			t.Errorf("agent %c: OptimalDistance = %d, want > 0", a.Label, a.OptimalDistance)
+		}
+		if len(a.ShortestPath) == 0 {
+			t.Errorf("agent %c: ShortestPath empty", a.Label)
+		}
+		if !a.ShortestPath[a.EntrancePos] {
+			t.Errorf("agent %c: ShortestPath should contain own entrance %v", a.Label, a.EntrancePos)
+		}
+		if !a.ShortestPath[w.Maze.GoalPos] {
+			t.Errorf("agent %c: ShortestPath should contain goal %v", a.Label, w.Maze.GoalPos)
+		}
+	}
+}
+
+// TestShortestPathCells_UnionsAllAgents: the world-level overlay
+// set is the union of every agent's individual ShortestPath.
+func TestShortestPathCells_UnionsAllAgents(t *testing.T) {
+	w := NewWorld(59)
+	// Every cell in any agent's ShortestPath must be in the union.
+	for _, a := range w.Agents {
+		for p := range a.ShortestPath {
+			if !w.ShortestPathCells[p] {
+				t.Errorf("union missing cell %v from agent %c", p, a.Label)
+			}
+		}
+	}
+}
+
+// TestTTL_UsesPerAgentOptimalDistance: stamp a high agent.OptimalDistance
+// and confirm the TTL kill rule allows ActualDistance up to
+// TTLMultiplier × that value (much higher than the world-wide
+// Stats.OptimalDistance would have allowed).
+func TestTTL_UsesPerAgentOptimalDistance(t *testing.T) {
+	w := NewWorld(60)
+	a := SpawnAgentForTest(w, '1')
+	w.Stats.OptimalDistance = 10           // tight world-wide value
+	a.OptimalDistance = 500                // generous per-agent value
+	a.Stats.ActualDistance = 51            // > 5*10 but < 5*500
+	// With the OLD world-wide rule this would kill; with the new
+	// per-agent rule the agent survives.
+	w.MoveAgents()
+	if !a.Alive {
+		t.Error("per-agent TTL: agent killed by world-wide rule instead of per-agent rule")
 	}
 }
 

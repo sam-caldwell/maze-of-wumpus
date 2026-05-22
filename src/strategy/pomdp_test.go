@@ -112,8 +112,9 @@ func TestPOMCPStrategy_PicksAMove(t *testing.T) {
 	}
 }
 
-// TestPOMCPStrategy_ColdStartFallbackMoves: at game start, agent 7
-// must still pick a cardinal neighbor via outward-bias rollouts.
+// TestPOMCPStrategy_ColdStartFallbackMoves: at game start, agent 6
+// must still pick a Moore-adjacent neighbor (cardinal or diagonal)
+// via outward-bias rollouts.
 func TestPOMCPStrategy_ColdStartFallbackMoves(t *testing.T) {
 	w := newConfiguredWorld(602)
 	killAllWumpus(w)
@@ -123,8 +124,8 @@ func TestPOMCPStrategy_ColdStartFallbackMoves(t *testing.T) {
 		t.Errorf("POMCPStrategy froze at game start: %v", got)
 	}
 	dx, dy := got.X-a.Pos.X, got.Y-a.Pos.Y
-	if world.AbsInt(dx)+world.AbsInt(dy) != 1 {
-		t.Errorf("POMCPStrategy returned non-cardinal step %v from %v", got, a.Pos)
+	if world.AbsInt(dx) > 1 || world.AbsInt(dy) > 1 || (dx == 0 && dy == 0) {
+		t.Errorf("POMCPStrategy returned non-Moore-adjacent step %v from %v", got, a.Pos)
 	}
 }
 

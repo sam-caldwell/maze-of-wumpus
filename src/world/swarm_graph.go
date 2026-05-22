@@ -25,37 +25,52 @@ package world
 
 import "container/heap"
 
-// swarmGraphState caches the most recent pruned-alive set so we
-// don't recompute every tick. Stored on World; updated lazily when
-// the swarm union grows.
+// swarmGraphState caches the most recent pruned-alive set for ONE
+// swarm group. Stored on World indexed by SwarmGroupID — each
+// independent swarm gets its own cache, so distinct swarms never
+// share pruning state.
 type swarmGraphState struct {
 	aliveCells    map[Pos]bool
 	lastUnionSize int
 }
 
-// RecomputeSwarmGraphIfStale rebuilds the pruned alive-cell set
-// when the swarm's union of KnownCells has grown since the last
-// computation. Cheap dirty-check via size; for a 120×80 maze the
-// recompute itself runs ~ O(anchors × V) and is amortized over
-// many ticks where the union doesn't change.
-func (w *World) RecomputeSwarmGraphIfStale() {
-	union := w.unionSwarmKnownCells()
-	if w.swarmGraph.aliveCells != nil && len(union) == w.swarmGraph.lastUnionSize {
+// RecomputeSwarmGraphIfStale rebuilds the pruned alive-cell set for
+// `groupID` when that swarm's KnownCells union has grown since the
+// last computation. Each independent SwarmGroupID has its own
+// cache entry in w.swarmGraphs.
+func (w *World) RecomputeSwarmGraphIfStale(groupID int) {
+	if groupID == 0 {
 		return
 	}
-	w.swarmGraph.aliveCells = w.pruneSwarmGraph(union)
-	w.swarmGraph.lastUnionSize = len(union)
+	union := w.unionSwarmKnownCells(groupID)
+	if w.swarmGraphs == nil {
+		w.swarmGraphs = map[int]*swarmGraphState{}
+	}
+	state, ok := w.swarmGraphs[groupID]
+	if !ok {
+		state = &swarmGraphState{}
+		w.swarmGraphs[groupID] = state
+	}
+	if state.aliveCells != nil && len(union) == state.lastUnionSize {
+		return
+	}
+	state.aliveCells = w.pruneSwarmGraph(union, groupID)
+	state.lastUnionSize = len(union)
 }
 
-// SwarmAliveCell reports whether `p` survived the swarm's mid-flight
-// pruning. Returns true when no pruning has run yet (no swarm, or
-// first tick) so existing planners default to "treat everything as
-// alive." Strategy S consults this to filter its planning view.
-func (w *World) SwarmAliveCell(p Pos) bool {
-	if w.swarmGraph.aliveCells == nil {
+// SwarmAliveCell reports whether `p` survived the per-group swarm
+// pruning for the given SwarmGroupID. Returns true when no pruning
+// has run yet for that group (no swarm, or first tick) so existing
+// planners default to "treat everything as alive."
+func (w *World) SwarmAliveCell(groupID int, p Pos) bool {
+	if groupID == 0 || w.swarmGraphs == nil {
 		return true
 	}
-	return w.swarmGraph.aliveCells[p]
+	state, ok := w.swarmGraphs[groupID]
+	if !ok || state.aliveCells == nil {
+		return true
+	}
+	return state.aliveCells[p]
 }
 
 // RecomputeAgentPrunedViewIfStale rebuilds the per-agent pruned view
@@ -96,13 +111,19 @@ func (w *World) RecomputeAgentPrunedViewIfStale(a *Agent) {
 }
 
 // unionSwarmKnownCells gathers every cell perceived by any alive
-// agent currently using SwarmStrategyLetter. Walls included (they
-// were perceived but block onward routing) because the planner
-// gates on IsWalkable separately.
-func (w *World) unionSwarmKnownCells() map[Pos]bool {
+// agent (and any alive clone) belonging to the given SwarmGroupID.
+// Walls included — the planner gates on IsWalkable separately.
+// Returns an empty map when no member of the group is alive.
+func (w *World) unionSwarmKnownCells(groupID int) map[Pos]bool {
 	out := map[Pos]bool{}
+	if groupID == 0 {
+		return out
+	}
 	for _, a := range w.Agents {
 		if !a.Alive || a.CurrentStrategy != SwarmStrategyLetter {
+			continue
+		}
+		if a.SwarmGroupID != groupID {
 			continue
 		}
 		for p := range a.KnownCells {
@@ -112,17 +133,21 @@ func (w *World) unionSwarmKnownCells() map[Pos]bool {
 	return out
 }
 
-// pruneSwarmGraph runs both phases of the pruner on the union of
-// every swarm member's KnownCells. The swarm members' current
-// positions are added as anchors so an agent currently standing in
-// a dead-end can still plan its way out. Returns the alive set
-// (cells the planner should treat as walkable). The input
-// swarmKnown stays untouched.
-func (w *World) pruneSwarmGraph(swarmKnown map[Pos]bool) map[Pos]bool {
+// pruneSwarmGraph runs both phases of the pruner on a single swarm
+// group's union. The leader's position plus every alive clone's
+// position are added as anchors so any swarm member currently
+// standing in a dead-end can still plan its way out.
+func (w *World) pruneSwarmGraph(swarmKnown map[Pos]bool, groupID int) map[Pos]bool {
 	var memberPos []Pos
 	for _, peer := range w.Agents {
-		if peer.Alive && peer.CurrentStrategy == SwarmStrategyLetter {
+		if peer.Alive && peer.CurrentStrategy == SwarmStrategyLetter &&
+			peer.SwarmGroupID == groupID {
 			memberPos = append(memberPos, peer.Pos)
+			for _, c := range peer.SwarmClones {
+				if c != nil && c.Alive {
+					memberPos = append(memberPos, c.Pos)
+				}
+			}
 		}
 	}
 	return w.pruneGraph(swarmKnown, memberPos, true)

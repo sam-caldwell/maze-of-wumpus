@@ -86,7 +86,7 @@ func qmdpStrategyPlan(w *world.World, a *world.Agent) world.Pos {
 		}
 		safety := (1 - pitP) * (1 - wumpP)
 		explore := float64(0)
-		if d := w.DistFromStart[np.Y][np.X]; d > 0 {
+		if d := a.DistFromStart[np.Y][np.X]; d > 0 {
 			explore = float64(d)
 		}
 		scent := w.ScentSignedFreshness(a, np.X, np.Y)

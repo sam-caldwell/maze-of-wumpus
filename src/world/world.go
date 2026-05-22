@@ -371,10 +371,57 @@ type Agent struct {
 	// are skipped. nil until the first prune-recompute.
 	PrunedKnownCells map[Pos]bool
 
+	// SwarmGroupID uniquely identifies an INDEPENDENT swarm. Set
+	// when the agent picks strategy S (in RespawnAgents, after
+	// quorum/singleton enforcement). Multiple agents on S with the
+	// SAME SwarmGroupID share KnownCells/Beliefs as a single
+	// cohesive unit. Different SwarmGroupIDs are walled off — two
+	// distinct swarms never share knowledge. 0 = not currently in a
+	// swarm.
+	SwarmGroupID int
+
+	// SwarmClones holds the 10 follower entities that move alongside
+	// a swarm leader. Each clone shares `a.KnownCells` and
+	// `a.Beliefs` with the leader (the leader IS the shared state).
+	// nil if the agent is not currently a swarm leader. When the
+	// leader dies, one clone is promoted to leader (the swarm
+	// shrinks 11→10) until no clones remain and the swarm
+	// dissolves.
+	SwarmClones []*SwarmClone
+
 	// prunedKnownSize is len(KnownCells) at the last prune-recompute.
 	// KnownCells is monotonic within a map life so a size delta is
 	// a sufficient dirty signal.
 	prunedKnownSize int
+
+	// EntrancePos is THIS agent's spawn cell. Each agent in the
+	// world is assigned a distinct perimeter cell at construction
+	// (see World.pickAgentEntrances). Replaces the legacy "every
+	// agent spawns at Maze.EntrancePos" behavior. RespawnAgents
+	// uses this when re-spawning the agent on a fresh life.
+	EntrancePos Pos
+
+	// OptimalDistance is the step-count of the shortest path from
+	// THIS agent's EntrancePos to the maze goal. Drives the
+	// per-agent TTL kill rule:
+	//   ActualDistance > TTLMultiplier × OptimalDistance → death
+	// Agents spawning closer to the goal get a tighter TTL window;
+	// agents spawning farther get a generous one — proportional
+	// to the actual difficulty of their start.
+	OptimalDistance int
+
+	// ShortestPath is the set of cells lying on one Dijkstra-min
+	// path from EntrancePos to GoalPos for this agent. The TUI 's'
+	// overlay unions every agent's ShortestPath so the user can
+	// see all 12 routes at once.
+	ShortestPath map[Pos]bool
+
+	// DistFromStart[y][x] is the BFS distance from THIS agent's
+	// EntrancePos to (x, y) — the per-agent "outward bias" signal
+	// used by POMCP/QMDP/ScentFollower as the only legitimate
+	// spatial heuristic under strict PO. -1 means unreachable.
+	// Computed once at world construction.
+	DistFromStart [BoardHeight][BoardWidth]int
 
 	// LearnedTTL is the agent's belief about how many steps it can
 	// take before the TTL killer fires. 0 means "unknown" (the
@@ -454,6 +501,24 @@ const (
 // WumpusHuntModeCount is the number of distinct hunt modes; used by
 // the spawn code to pick uniformly.
 const WumpusHuntModeCount = 3
+
+// SwarmClonesPerLeader is the number of clone entities spawned
+// alongside each swarm leader. Total swarm size on spawn = 1 leader
+// + 10 clones = 11 entities.
+const SwarmClonesPerLeader = 10
+
+// SwarmClone is a follower entity that moves alongside a swarm
+// leader. Clones share their leader's KnownCells and Beliefs but
+// track their own per-tick position, plan, and short-path cache.
+// When a clone reaches the goal, its leader gets the credit.
+// When the leader dies, one clone is promoted to leader to keep
+// the swarm coherent.
+type SwarmClone struct {
+	Pos               Pos
+	Plan              []Pos
+	KnownShortestPath []Pos
+	Alive             bool
+}
 
 // SwarmStrategyLetter is the strategy letter whose agents share
 // knowledge (KnownCells, Beliefs, KnownShortestPath) with their
@@ -640,6 +705,12 @@ type World struct {
 
 	nextAgentID       int
 	nextWumpusID      int
+
+	// nextSwarmGroupID is the per-world monotonic counter for
+	// issuing independent swarm IDs. Bumped each time an agent
+	// commits to strategy S without an existing SwarmGroupID. IDs
+	// are unique per world (reset to 0 on construction).
+	nextSwarmGroupID int
 	Rng               *rand.Rand
 	wumpusStrategyFn  func(*rand.Rand) WumpusStrategy // factory for new wumpus
 	vengeanceStrategy WumpusStrategy
@@ -651,11 +722,12 @@ type World struct {
 	// letters (e.g. {'R','S','T','U','V','W','X'}) used by
 	// PickStrategy. Plumbed via Config.StrategyLetters.
 	strategyLetters []rune
-	// swarmGraph caches the most-recently computed pruned alive-
-	// cell set for strategy-S members. Updated lazily by
-	// RecomputeSwarmGraphIfStale when the swarm's KnownCells union
-	// grows. See swarm_graph.go.
-	swarmGraph swarmGraphState
+	// swarmGraphs holds one pruned-alive-cell cache per independent
+	// swarm group (keyed by SwarmGroupID). Each entry is rebuilt
+	// lazily by RecomputeSwarmGraphIfStale when that group's
+	// KnownCells union grows. Separate keys = walled-off swarms.
+	// See swarm_graph.go.
+	swarmGraphs map[int]*swarmGraphState
 	// strategyDescriptionForLetter renders a strategy letter as a
 	// ≤64-char description. Plumbed via
 	// Config.StrategyDescriptionForLetter.
@@ -776,16 +848,13 @@ func NewWorldWithConfig(cfg Config) *World {
 	// POMCP / QMDP) and DQN (deep Q-network). DQN weights take ~1KB
 	// per agent — negligible at 12 agents.
 	labels := []rune{'1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C'}
-	// Initial spawn stagger: agent i appears 1 second (= RespawnTicks
-	// ticks at the 100ms tick interval) after agent i-1. So agent 1
-	// is on the board at tick 1, agent 2 at tick 11, agent 3 at tick
-	// 21, etc. The visible rollout lets the user (and the rendering
-	// pipeline) catch each agent's entrance distinctly instead of
-	// the whole roster materializing in one frame.
+	// All twelve agents spawn simultaneously on the first tick. The
+	// per-agent perimeter entrances (assigned below) already
+	// distribute them across the maze, so we no longer stagger
+	// arrivals — there's no visual clumping at one door to avoid.
 	w.Agents = make([]*Agent, 0, len(labels))
-	for i, l := range labels {
-		offset := 1 + i*RespawnTicks
-		a := newAgent(&w.nextAgentID, l, stratFor(l), NewAgentBeliefs(), offset)
+	for _, l := range labels {
+		a := newAgent(&w.nextAgentID, l, stratFor(l), NewAgentBeliefs(), 1)
 		a.DQN = NewDQN(w.Rng)
 		w.Agents = append(w.Agents, a)
 	}
@@ -809,9 +878,27 @@ func NewWorldWithConfig(cfg Config) *World {
 	// PickTrustee the moment each follower agent comes alive (and
 	// again at the start of every subsequent journey).
 
+	// Per-agent entry assignment: pick distinct perimeter cells (one
+	// per agent) and carve each into the maze with a guaranteed path
+	// to the goal. Falls back to the canonical Maze.EntrancePos for
+	// every agent if the picker can't satisfy 12 distinct entries
+	// (extremely rare; the perimeter is ~400 cells).
+	entries := w.pickAgentEntrances(len(w.Agents))
+	for i, a := range w.Agents {
+		w.initAgentEntrance(a, entries[i])
+	}
+
 	w.Stats.OptimalDistance = w.ShortestPathLength(w.Maze.EntrancePos, w.Maze.GoalPos)
 	w.Stats.ShortestPaths = w.CountShortestPaths(w.Maze.EntrancePos, w.Maze.GoalPos, MaxShortestPathsCount)
-	w.ShortestPathCells = w.ShortestPathSet(w.Maze.EntrancePos, w.Maze.GoalPos)
+	// ShortestPathCells is the union of every agent's individual
+	// entrance→goal path. The TUI 's' overlay highlights this set,
+	// so the user sees all 12 agents' shortest routes simultaneously.
+	w.ShortestPathCells = map[Pos]bool{}
+	for _, a := range w.Agents {
+		for p := range a.ShortestPath {
+			w.ShortestPathCells[p] = true
+		}
+	}
 	w.computeDistFromStart()
 	// Permanently strip any entity whose toggle is currently disabled.
 	// With the default config (everything disabled) this leaves a
@@ -825,6 +912,174 @@ func NewWorldWithConfig(cfg Config) *World {
 	// follow.
 	w.RecordEvent("yellow", w.pickTemplate(startingMessages))
 	return w
+}
+
+// pickAgentEntrances returns `n` distinct perimeter cells, each one
+// guaranteed to have a path to GoalPos. Cells are sampled randomly
+// from all four sides of the board. If a chosen perimeter cell's
+// inward neighbor is a wall, a corridor is carved straight inward
+// until existing maze path is reached — this guarantees connection
+// without disturbing the rest of the maze topology.
+//
+// The maze's canonical Maze.EntrancePos is always returned as the
+// first entry to preserve legacy behavior (stats / pruner anchor).
+// Subsequent entries are random perimeter cells satisfying:
+//   - distinct from the goal and from every previously-picked entry
+//   - Manhattan distance ≥ MinGoalDistanceCells/2 from goal (so
+//     spawns aren't trivially adjacent to the goal cell)
+//
+// Each picked entry is marked as CellEntrance after carving so the
+// TUI renders all entry doorways with the entrance glyph.
+func (w *World) pickAgentEntrances(n int) []Pos {
+	out := make([]Pos, 0, n)
+	used := map[Pos]bool{}
+	// Canonical entrance leads the list.
+	out = append(out, w.Maze.EntrancePos)
+	used[w.Maze.EntrancePos] = true
+	if n <= 1 {
+		return out
+	}
+
+	// Enumerate perimeter candidates, excluding the four corner
+	// cells (they're shared between two sides and aesthetically
+	// "feel" like neither edge) and the goal. Each side gets its
+	// own pool so we can distribute picks across all four edges.
+	type side []Pos
+	sides := make([]side, 4)
+	for x := 1; x < BoardWidth-1; x++ {
+		sides[0] = append(sides[0], Pos{x, 0})              // top
+		sides[1] = append(sides[1], Pos{x, BoardHeight - 1}) // bottom
+	}
+	for y := 1; y < BoardHeight-1; y++ {
+		sides[2] = append(sides[2], Pos{0, y})             // left
+		sides[3] = append(sides[3], Pos{BoardWidth - 1, y}) // right
+	}
+	for i := range sides {
+		w.Rng.Shuffle(len(sides[i]), func(a, b int) {
+			sides[i][a], sides[i][b] = sides[i][b], sides[i][a]
+		})
+	}
+
+	minGoalDist := MinGoalDistanceCells / 2
+	cursor := 0
+	for len(out) < n {
+		picked := false
+		for tries := 0; tries < 4; tries++ {
+			idx := (cursor + tries) % 4
+			s := sides[idx]
+			for j, p := range s {
+				if used[p] || p == w.Maze.GoalPos {
+					continue
+				}
+				if AbsInt(p.X-w.Maze.GoalPos.X)+AbsInt(p.Y-w.Maze.GoalPos.Y) < minGoalDist {
+					continue
+				}
+				if !w.carveEntryConnection(p) {
+					continue
+				}
+				out = append(out, p)
+				used[p] = true
+				// Drop this candidate from its side so we don't
+				// re-scan it next round.
+				sides[idx] = append(s[:j], s[j+1:]...)
+				picked = true
+				break
+			}
+			if picked {
+				break
+			}
+		}
+		if !picked {
+			// No perimeter cell satisfies all constraints; fall back
+			// to the canonical entrance for the remaining agents.
+			for len(out) < n {
+				out = append(out, w.Maze.EntrancePos)
+			}
+			return out
+		}
+		cursor = (cursor + 1) % 4
+	}
+	return out
+}
+
+// carveEntryConnection ensures the perimeter cell `p` is walkable
+// AND has a path to the rest of the maze. If `p`'s inward neighbor
+// is wall, a straight corridor is carved inward until existing path
+// is hit (or the boundary on the other side, which is degenerate).
+// Returns true if the carve resulted in a perimeter cell that can
+// reach the goal; false otherwise (the caller drops this candidate).
+func (w *World) carveEntryConnection(p Pos) bool {
+	if w.Maze.Cells[p.Y][p.X] == CellGoal {
+		return false
+	}
+	// Pick the inward direction (only one is valid for a perimeter
+	// cell).
+	var dx, dy int
+	switch {
+	case p.Y == 0:
+		dy = 1
+	case p.Y == BoardHeight-1:
+		dy = -1
+	case p.X == 0:
+		dx = 1
+	case p.X == BoardWidth-1:
+		dx = -1
+	default:
+		return false // not a perimeter cell
+	}
+	w.Maze.Cells[p.Y][p.X] = CellEntrance
+	// Walk inward, carving walls until existing path is reached.
+	x, y := p.X+dx, p.Y+dy
+	for InBounds(x, y) && w.Maze.Cells[y][x] == CellWall {
+		w.Maze.Cells[y][x] = CellPath
+		x += dx
+		y += dy
+	}
+	// Verify connectivity to the goal.
+	if len(w.DijkstraPath(p, w.Maze.GoalPos, w.Maze.IsWalkable)) == 0 {
+		return false
+	}
+	return true
+}
+
+// initAgentEntrance attaches a perimeter entry to an agent: stamps
+// the agent's EntrancePos, computes its OptimalDistance and
+// ShortestPath to the goal, and populates its per-agent DistFromStart
+// BFS table. Called once per agent at world construction; values
+// stay fixed for the life of the maze.
+func (w *World) initAgentEntrance(a *Agent, entry Pos) {
+	a.EntrancePos = entry
+	a.ShortestPath = w.ShortestPathSet(entry, w.Maze.GoalPos)
+	a.OptimalDistance = w.ShortestPathLength(entry, w.Maze.GoalPos)
+	// Per-agent DistFromStart BFS (4-connected, matches the existing
+	// World.computeDistFromStart semantics so strategy outward-bias
+	// math stays comparable).
+	for y := 0; y < BoardHeight; y++ {
+		for x := 0; x < BoardWidth; x++ {
+			a.DistFromStart[y][x] = -1
+		}
+	}
+	a.DistFromStart[entry.Y][entry.X] = 0
+	queue := []Pos{entry}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		d := a.DistFromStart[cur.Y][cur.X]
+		for _, dir := range Cardinals {
+			np := Pos{X: cur.X + dir.X, Y: cur.Y + dir.Y}
+			if !InBounds(np.X, np.Y) || !w.Maze.IsWalkable(np) {
+				continue
+			}
+			if w.Maze.IsCornerClipped(cur, np) {
+				continue
+			}
+			if a.DistFromStart[np.Y][np.X] != -1 {
+				continue
+			}
+			a.DistFromStart[np.Y][np.X] = d + 1
+			queue = append(queue, np)
+		}
+	}
 }
 
 // computeDistFromStart populates DistFromStart with the BFS distance
@@ -1138,6 +1393,37 @@ func (w *World) ResolveCombat() {
 			}
 		}
 	}
+	// Wumpus-vs-clone combat: clones can kill or be killed just
+	// like agents. A clone kill credits the leader (Stats.WumpusKilled++).
+	for _, leader := range w.Agents {
+		if !leader.Alive || leader.Disabled || leader.SwarmGroupID == 0 {
+			continue
+		}
+		for _, c := range leader.SwarmClones {
+			if c == nil || !c.Alive {
+				continue
+			}
+			for _, d := range Cardinals {
+				nx, ny := c.Pos.X+d.X, c.Pos.Y+d.Y
+				if !InBounds(nx, ny) {
+					continue
+				}
+				wm := w.WumpusAt[ny][nx]
+				if wm == nil || !wm.Alive {
+					continue
+				}
+				if w.Rng.Float64() < 0.5 {
+					w.KillWumpus(wm)
+					leader.Stats.WumpusKilled++
+					w.recordAgentWumpusKill(leader)
+				} else {
+					c.Alive = false
+					wm.CyclesSinceKill = 0
+					break
+				}
+			}
+		}
+	}
 	seen := map[[2]int]bool{}
 	for _, w1 := range w.Wumpus {
 		if !w1.Alive {
@@ -1288,7 +1574,20 @@ func (w *World) MoveAgents() {
 		a.LastFromCell = oldPos
 		a.HasLastFrom = true
 		a.PendingBonus += w.ApplyScentShaping(a)
-		if !w.TTLDisabled && w.Stats.OptimalDistance > 0 && a.Stats.ActualDistance > TTLMultiplier*w.Stats.OptimalDistance {
+		// Per-agent TTL: each agent is judged against its OWN
+		// EntrancePos→GoalPos shortest path, not the world-wide one.
+		// Agents that spawn closer to the goal get a tighter TTL
+		// window; agents far from goal get a generous one — exactly
+		// scaled to the difficulty of their spawn.
+		ttlBudget := a.OptimalDistance
+		if ttlBudget <= 0 {
+			// Legacy fallback for agents whose per-agent OptimalDistance
+			// wasn't initialized (e.g., unit tests that build Agents
+			// manually). Use the world-wide value as a conservative
+			// default.
+			ttlBudget = w.Stats.OptimalDistance
+		}
+		if !w.TTLDisabled && ttlBudget > 0 && a.Stats.ActualDistance > TTLMultiplier*ttlBudget {
 			w.KillAgent(a, "ttl")
 		}
 		// Learn-by-dying invalidation half: if the agent's still
@@ -1300,6 +1599,11 @@ func (w *World) MoveAgents() {
 			a.LearnedTTL = 0
 		}
 	}
+	// Note: swarm clone movement is driven from inside
+	// SwarmBayesianStrategy (strategy package) so every clone uses
+	// the real Bayesian planning core — not a stripped-down outward-
+	// bias step. That way each clone is its own goal-seeker against
+	// the shared (pruned) KnownCells.
 }
 
 // CanMoveTo reports whether agent `a` could legally move to `target`
@@ -1454,6 +1758,22 @@ func (w *World) ResolvePitDeaths() {
 			w.KillWumpus(wm)
 		}
 	}
+	// Swarm clones die on fire pits with no water-share fallback —
+	// the leader's water charge protects only the leader's own
+	// cell. Killed clones leave the swarm's count down by one.
+	for _, leader := range w.Agents {
+		if !leader.Alive || leader.Disabled || leader.SwarmGroupID == 0 {
+			continue
+		}
+		for _, c := range leader.SwarmClones {
+			if c == nil || !c.Alive {
+				continue
+			}
+			if w.Maze.Cells[c.Pos.Y][c.Pos.X] == CellFirePit {
+				c.Alive = false
+			}
+		}
+	}
 }
 
 // ExtinguishFirePit converts a fire-pit cell back into a path cell,
@@ -1537,9 +1857,11 @@ func (w *World) CollectWater() {
 	}
 }
 
-// MaxStartsPerMaze is the per-agent spawn cap for a single maze.
-// Once Stats.Starts hits this value, the agent retires for the
-// remainder of the maze and stops respawning.
+// MaxStartsPerMaze is a historical per-agent spawn cap. Retirement
+// is now goal-based (see RespawnAgents) so this constant is kept
+// only as a reference / soft expectation of how many lives an
+// average run uses on a single maze. RespawnAgents does NOT consult
+// it.
 const MaxStartsPerMaze = 999
 
 // MazeSolvedGoals is the per-agent goal-reach threshold that
@@ -1566,15 +1888,30 @@ func (w *World) MazeSolved() bool {
 }
 
 // RespawnAgents counts respawn timers down; at 0 it places the agent
-// at the entrance. Agents may share the entrance cell at spawn time.
-// Once Stats.Starts >= MaxStartsPerMaze the agent retires — no more
-// spawns until the maze is reseeded.
+// at its EntrancePos. Agents may share the entrance cell at spawn time.
+// Retirement is goal-based: once an agent's Stats.GoalsReached hits
+// MazeSolvedGoals, mission-accomplished — the agent stops respawning
+// (it's done its share toward the maze-solved condition). Agents that
+// keep dying without reaching that threshold keep getting fresh
+// lives — there's no per-map retry cap that would lock a struggling
+// agent out of the maze before the map gets reseeded.
 func (w *World) RespawnAgents() {
+	// justSpawned collects the agents that came alive on this tick.
+	// We bump StrategyPerf[…].Started AFTER quorum/singleton
+	// enforcement so the count reflects the FINAL strategy
+	// assignment (a respawn that got demoted from R or drafted into
+	// S should be tallied against the post-enforcement letter).
+	var justSpawned []*Agent
 	for _, a := range w.Agents {
 		if a.Disabled || a.Alive {
 			continue
 		}
-		if a.Stats.Starts >= MaxStartsPerMaze {
+		// Goal-based retirement: stop respawning once the agent has
+		// already contributed its MazeSolvedGoals worth of solves.
+		// (Start-based retirement was buggy — agents could exhaust
+		// MaxStartsPerMaze while still well below the goal threshold
+		// and get permanently locked out of the map.)
+		if a.Stats.GoalsReached >= MazeSolvedGoals {
 			continue
 		}
 		if a.RespawnIn > 0 {
@@ -1583,7 +1920,14 @@ func (w *World) RespawnAgents() {
 		if a.RespawnIn != 0 {
 			continue
 		}
-		entrance := w.Maze.EntrancePos
+		// Each agent spawns at its OWN EntrancePos (assigned once at
+		// world construction by pickAgentEntrances). Falls back to
+		// the maze's canonical entrance when an agent's entry
+		// wasn't initialized (e.g., tests that bypass construction).
+		entrance := a.EntrancePos
+		if entrance == (Pos{}) || !w.Maze.IsWalkable(entrance) {
+			entrance = w.Maze.EntrancePos
+		}
 		a.Alive = true
 		a.Stats.Starts++
 		// New journey begins. Pick the strategy FIRST (50% softmax
@@ -1622,9 +1966,65 @@ func (w *World) RespawnAgents() {
 		w.AgentAt[entrance.Y][entrance.X] = a
 		w.MarkAgentSensed(a)
 		a.RespawnIn = -1
+		justSpawned = append(justSpawned, a)
 	}
 	w.EnforceSwarmQuorum()
 	w.EnforceBenchmarkSingleton()
+	// Post-enforcement bookkeeping: tally Started (for #Runs) and
+	// set up swarm membership for any agent whose final strategy
+	// is S.
+	for _, a := range justSpawned {
+		if a.CurrentStrategy == 0 {
+			continue
+		}
+		w.ensureStrategyPerf(a.CurrentStrategy).Started++
+		w.maintainSwarmMembership(a)
+	}
+}
+
+// maintainSwarmMembership updates a.SwarmGroupID + a.SwarmClones to
+// reflect the agent's current strategy. Called after every spawn /
+// enforcement pass.
+//
+//   - If a.CurrentStrategy == SwarmStrategyLetter and a.SwarmGroupID
+//     is 0, allocate a fresh swarm ID (independent of any existing
+//     swarm) and spawn SwarmClonesPerLeader clones at the agent's
+//     EntrancePos.
+//   - If a.CurrentStrategy is anything else and a.SwarmGroupID is
+//     non-zero, the agent has left the swarm — clear membership and
+//     drop clones.
+//
+// Existing S-members keep their SwarmGroupID across respawns so
+// that group cohesion persists through individual deaths (the
+// promotion-on-leader-death path).
+func (w *World) maintainSwarmMembership(a *Agent) {
+	if a.CurrentStrategy == SwarmStrategyLetter {
+		if a.SwarmGroupID == 0 {
+			w.nextSwarmGroupID++
+			a.SwarmGroupID = w.nextSwarmGroupID
+		}
+		if a.SwarmClones == nil {
+			a.SwarmClones = make([]*SwarmClone, 0, SwarmClonesPerLeader)
+			for i := 0; i < SwarmClonesPerLeader; i++ {
+				a.SwarmClones = append(a.SwarmClones, &SwarmClone{
+					Pos:   a.EntrancePos,
+					Alive: true,
+				})
+			}
+			// Each clone is its own "started run" — it can die or
+			// reach the goal independently. Bump Started by the
+			// clone count so #Runs counts every entity's start, not
+			// just the leader's (the leader was already counted
+			// in the per-agent bump in RespawnAgents).
+			w.ensureStrategyPerf(SwarmStrategyLetter).Started += SwarmClonesPerLeader
+		}
+		return
+	}
+	// Left the swarm.
+	if a.SwarmGroupID != 0 {
+		a.SwarmGroupID = 0
+		a.SwarmClones = nil
+	}
 }
 
 // EnforceBenchmarkSingleton caps the omniscient R strategy at
@@ -1652,45 +2052,18 @@ func (w *World) EnforceBenchmarkSingleton() {
 	}
 }
 
-// EnforceSwarmQuorum guarantees that if ANY alive agent is using
-// strategy S (SwarmStrategyLetter), at least SwarmMinQuorum (3)
-// alive agents are on S. When the swarm is undersized
-// (1 or 2 members), the function drafts alive non-S agents into S
-// — overriding their PickStrategy decision for this journey — until
-// the quorum is met or the pool of draftable agents is exhausted.
+// EnforceSwarmQuorum is now a no-op under the independent-swarm
+// model. Previously this function drafted agents into S to meet a
+// SwarmMinQuorum=3 threshold; that made sense when ALL S-agents
+// shared one global hive. Under per-agent swarms — each S-picker
+// is its own complete swarm of 1 leader + SwarmClonesPerLeader
+// clones — quorum is automatic: every S-picker already has 11
+// members.
 //
-// Drafted agents also have their CurrentTrustee cleared since S is
-// scent-blind (a trustee in that context would just accumulate
-// undeserved trust penalties).
-//
-// Called automatically at the end of RespawnAgents each tick.
+// Kept as an exported method so existing call sites (and tests)
+// continue to compile. Safe to remove in a future cleanup.
 func (w *World) EnforceSwarmQuorum() {
-	var alive []*Agent
-	onSwarm := 0
-	for _, a := range w.Agents {
-		if !a.Alive || a.Disabled {
-			continue
-		}
-		alive = append(alive, a)
-		if a.CurrentStrategy == SwarmStrategyLetter {
-			onSwarm++
-		}
-	}
-	if onSwarm == 0 || onSwarm >= SwarmMinQuorum {
-		return
-	}
-	need := SwarmMinQuorum - onSwarm
-	for _, a := range alive {
-		if a.CurrentStrategy == SwarmStrategyLetter {
-			continue
-		}
-		a.CurrentStrategy = SwarmStrategyLetter
-		a.CurrentTrustee = 0
-		need--
-		if need == 0 {
-			return
-		}
-	}
+	// Intentional no-op. See doc comment.
 }
 
 // RecomputeStench rebuilds the stench grid from current wumpus
@@ -1730,6 +2103,38 @@ func (w *World) RecomputeStench() {
 // CheckGoal: when an agent reaches the goal, record solve stats,
 // bump GoalsReached, queue respawn, and spawn a fresh hazard.
 func (w *World) CheckGoal() {
+	// Swarm clones reaching the goal credit their leader. We do
+	// this BEFORE the leader-position pass so a swarm can still
+	// score even if the leader itself never reached the goal cell.
+	for _, leader := range w.Agents {
+		if !leader.Alive || leader.SwarmGroupID == 0 || len(leader.SwarmClones) == 0 {
+			continue
+		}
+		for _, c := range leader.SwarmClones {
+			if c == nil || !c.Alive || c.Pos != w.Maze.GoalPos {
+				continue
+			}
+			// Snap the leader onto the goal cell so the existing
+			// per-agent goal-handling treats this as a leader win.
+			// All clones drop with the leader; on respawn the swarm
+			// reforms with 10 fresh clones.
+			if w.AgentAt[leader.Pos.Y][leader.Pos.X] == leader {
+				w.AgentAt[leader.Pos.Y][leader.Pos.X] = nil
+			}
+			leader.Pos = w.Maze.GoalPos
+			w.AgentAt[leader.Pos.Y][leader.Pos.X] = leader
+			// Mark all clones dead so leader's respawn rebuilds a
+			// fresh swarm rather than carrying old clone positions.
+			for _, c2 := range leader.SwarmClones {
+				if c2 != nil {
+					c2.Alive = false
+				}
+			}
+			leader.SwarmClones = nil
+			leader.SwarmGroupID = 0
+			break
+		}
+	}
 	for _, a := range w.Agents {
 		if !a.Alive || a.Pos != w.Maze.GoalPos {
 			continue
@@ -1848,6 +2253,32 @@ func (w *World) SpawnGoalHazard() {
 // KillAgent removes the agent from the spatial index, increments per-
 // agent death counter, records the cause, and starts the respawn timer.
 func (w *World) KillAgent(a *Agent, reason ...string) {
+	// Swarm leader promotion: if this agent is a swarm leader with
+	// at least one surviving clone, the clone is promoted into the
+	// leader slot instead of the swarm dissolving. The leader's
+	// life continues (no Stats.Deaths bump, no respawn, no trust
+	// update for this "death" — it's a body swap, not a journey end).
+	if a.SwarmGroupID != 0 && a.SwarmClones != nil {
+		for i, c := range a.SwarmClones {
+			if c == nil || !c.Alive {
+				continue
+			}
+			// Promote clone i into the leader slot.
+			if w.AgentAt[a.Pos.Y][a.Pos.X] == a {
+				w.AgentAt[a.Pos.Y][a.Pos.X] = nil
+			}
+			a.Pos = c.Pos
+			a.Plan = c.Plan
+			a.KnownShortestPath = c.KnownShortestPath
+			w.AgentAt[a.Pos.Y][a.Pos.X] = a
+			// Shrink the clone slice (remove the promoted one).
+			a.SwarmClones = append(a.SwarmClones[:i], a.SwarmClones[i+1:]...)
+			a.SearchAnim = nil
+			return
+		}
+		// No clones left to promote — the swarm dies for real.
+		// Fall through to normal death handling.
+	}
 	// Journey ended in failure — update trust before clearing state.
 	w.endJourney(a, false)
 	a.Alive = false
@@ -2570,7 +3001,12 @@ func (w *World) endJourney(a *Agent, success bool) {
 		return
 	}
 	a.TrustScores[a.CurrentTrustee] += TrustGoalBonus
-	optimalTTL := TTLMultiplier * w.Stats.OptimalDistance
+	// Use the per-agent TTL ceiling, matching the kill rule's check.
+	ttlBudget := a.OptimalDistance
+	if ttlBudget <= 0 {
+		ttlBudget = w.Stats.OptimalDistance
+	}
+	optimalTTL := TTLMultiplier * ttlBudget
 	if optimalTTL > 0 && a.TicksAlive > 0 && a.TicksAlive <= optimalTTL {
 		a.TrustScores[a.CurrentTrustee] += TrustWithinTTLBonus
 	}
@@ -2588,6 +3024,12 @@ func (w *World) endJourney(a *Agent, success bool) {
 // TTLExpiry is a subset; it's tallied independently regardless of
 // follow state.
 type StrategyPerfCounts struct {
+	// Started: total runs launched on this strategy — bumped once
+	// per journey at RespawnAgents (after quorum / singleton
+	// enforcement has settled the assignment). The TUI's #Runs
+	// column reads this directly so deaths-by-any-cause and
+	// goal-reaches are all included in the total.
+	Started   int
 	TTLExpiry int
 	NoFollow  int
 	Following int
