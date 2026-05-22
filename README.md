@@ -32,6 +32,7 @@ tests, `go vet`, and `gofmt` pass.
 ## Contents
 
 - [Quick start](#quick-start)
+- [Screenshot](#screenshot)
 - [Project layout](#project-layout)
 - [The world](#the-world)
 - [Movement, perception, and pathfinding](#movement-perception-and-pathfinding)
@@ -74,6 +75,56 @@ Headless mode for scripted runs and CI (deterministic):
 ```bash
 ./build/maze-of-wumpus --headless --steps=200 --seed=42
 ```
+
+### Screenshot
+
+<p align="center">
+  <img src="docs/img/maze-of-wumpus.png" alt="Maze of Wumpus TUI in mid-game" width="960">
+</p>
+
+A mid-game capture (seed `1779466142107363000`, cycle 10599, 389 goals
+reached). Reading the screen left to right:
+
+- **Top-left status bar:** seed, cumulative GOALS counter, controls
+  footer.
+- **The maze:** 120 × 80 grid. Path cells render as the dim `·`,
+  walls as the dark gray `█`. Bright `S` squares on the perimeter
+  are the per-agent doorways — each agent's home cell is rendered
+  in that agent's identity color with a white copy of the agent's
+  own label (the visible `1`, `4`, `5`, `6`, `9`, `A`, `B`, `C` on
+  the edges). The yellow-on-green `G` is the goal cell; the bright
+  `·` blocks scattered across the corridors are scent breadcrumbs
+  in the depositing agent's color (long horizontal cyan strokes are
+  agent 5's QMDP trail). Agents in-play are the colored label glyphs
+  on the maze interior (e.g., a magenta `C` mid-board, a green `9`
+  on the east side).
+- **Right-side annex, top to bottom:**
+  - **Agent-Agent Trust** matrix with the 16-step heat legend
+    spliced into the right edge. Blue cells show small positive
+    trust scores; the diagonal `·` is each agent's own row.
+  - **Agent-Algorithm Trust** matrix — agent rows × strategy
+    columns (R/S/T/U/V/W/X). The first column is mostly red because
+    `R` is the omniscient benchmark and everyone trusts it; the
+    other columns show the slower accrual of trust across the PO
+    strategies.
+  - **Strategy Performance** table with column-normalized heat
+    backgrounds — `S` dominates the `Win.NoFollow` and `#Runs`
+    columns thanks to its 11-entity swarms; `T` and `U` lead the
+    `Die.TTL` column; `R` (omniscient) hasn't died but only racked
+    up two wins because at most one R-agent is alive at a time.
+  - **Agent Strategies / Wumpus Strategies** legends.
+  - **Events** panel: a rolling 5-line log of snark templates fired
+    from the goal/death/system pools (here showing two recent goal
+    reaches and three deaths, including one of the literary TTL
+    references).
+- **Bottom rows (one per agent):** label, alive/dead, current
+  strategy letter, lifetime starts, current trustee, learned-TTL
+  belief, deaths, kills, goals, current-life distance with per-agent
+  TTL ceiling (red-highlighted when close to expiry — see agent B's
+  `dist:0371` against `TTL:0450`), best solve metrics, solve-time
+  aggregates, cumulative score.
+- **Bottom status line:** cycle number, paths count, wumpus-killed
+  counter, hazard toggle states, controls help.
 
 ---
 
@@ -644,8 +695,9 @@ Each `World.Step()` runs:
 
 ## UI annex
 
-The right side of the maze renders a scrollable annex with these
-sections, top to bottom:
+See the [Screenshot](#screenshot) above for a live capture of every
+section described here. The right side of the maze renders a
+scrollable annex with these sections, top to bottom:
 
 ```
 Agent-Agent Trust
