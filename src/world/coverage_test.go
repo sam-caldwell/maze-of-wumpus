@@ -1137,6 +1137,78 @@ func TestKillAgent_NoCloneFallsThroughToDeath(t *testing.T) {
 	}
 }
 
+// TestEndJourney_OpportunisticCreditOnGoal: a follower that recorded
+// opportunistic followings of two peer labels and reaches the goal
+// must see BOTH peer labels gain trust (TrustGoalBonus + within-TTL
+// bonus when applicable).
+func TestEndJourney_OpportunisticCreditOnGoal(t *testing.T) {
+	w := NewWorld(322)
+	a := w.AgentByLabel('4') // a follower label
+	a.Alive = true
+	a.CurrentTrustee = 0 // no formal trustee
+	a.OptimalDistance = 100
+	a.TicksAlive = 50 // < TTLMultiplier*OptimalDistance → within TTL
+	a.OpportunisticFollowed = map[rune]bool{'2': true, '3': true}
+	a.TrustScores = map[rune]float64{}
+	w.endJourney(a, true)
+	gain2 := a.TrustScores['2']
+	gain3 := a.TrustScores['3']
+	want := TrustGoalBonus + TrustWithinTTLBonus
+	if gain2 != want {
+		t.Errorf("opportunistic trust for '2' = %v, want %v", gain2, want)
+	}
+	if gain3 != want {
+		t.Errorf("opportunistic trust for '3' = %v, want %v", gain3, want)
+	}
+}
+
+// TestEndJourney_OpportunisticNoCreditOnFailure: opportunistic
+// followings DON'T penalize on a failed run (the agent simply learns
+// nothing about those labels from a death — they may have led
+// somewhere fine and the agent died from other causes).
+func TestEndJourney_OpportunisticNoCreditOnFailure(t *testing.T) {
+	w := NewWorld(323)
+	a := w.AgentByLabel('4')
+	a.Alive = true
+	a.CurrentTrustee = 0
+	a.OpportunisticFollowed = map[rune]bool{'2': true}
+	a.TrustScores = map[rune]float64{}
+	w.endJourney(a, false)
+	if v := a.TrustScores['2']; v != 0 {
+		t.Errorf("opportunistic trust for '2' shouldn't change on failure: got %v", v)
+	}
+}
+
+// TestEndJourney_TrusteeAndOpportunisticBothCredit: when the agent
+// has BOTH a CurrentTrustee (with sufficient contact ticks) and
+// opportunistic followings on a winning run, both pathways credit
+// trust — the trustee gets credit via the existing gate, and any
+// OTHER labels in OpportunisticFollowed each get TrustGoalBonus.
+// The trustee label is NOT double-counted via the opportunistic path.
+func TestEndJourney_TrusteeAndOpportunisticBothCredit(t *testing.T) {
+	w := NewWorld(324)
+	a := w.AgentByLabel('4')
+	a.Alive = true
+	a.CurrentTrustee = '2'
+	a.JourneyTrusteeContactTicks = MinTrusteeContactTicks
+	a.OptimalDistance = 100
+	a.TicksAlive = 50
+	a.OpportunisticFollowed = map[rune]bool{
+		'2': true, // trustee — should NOT be double-credited via the opp path
+		'3': true, // peer    — should get opp credit
+	}
+	a.TrustScores = map[rune]float64{}
+	w.endJourney(a, true)
+	wantTrustee := TrustGoalBonus + TrustWithinTTLBonus
+	if got := a.TrustScores['2']; got != wantTrustee {
+		t.Errorf("trustee trust = %v, want %v (no double-credit)", got, wantTrustee)
+	}
+	wantPeer := TrustGoalBonus + TrustWithinTTLBonus
+	if got := a.TrustScores['3']; got != wantPeer {
+		t.Errorf("peer opportunistic trust = %v, want %v", got, wantPeer)
+	}
+}
+
 // TestCheckGoal_CloneOnGoalCreditsLeader: a clone reaching the goal
 // cell increments the leader's Stats.GoalsReached EXACTLY ONCE — the
 // whole swarm gets a single win regardless of how many clones touch

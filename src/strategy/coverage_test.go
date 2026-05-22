@@ -413,6 +413,110 @@ func TestSoloPrune_PreservesPOForW_NoGoalLeak(t *testing.T) {
 	}
 }
 
+// TestScentFollower_FollowsAnyNonSelfScent: with no trustee set and
+// only a peer's scent in range, U should still pick that direction
+// — opportunistic following.
+func TestScentFollower_FollowsAnyNonSelfScent(t *testing.T) {
+	w := newConfiguredWorld(630)
+	a := world.SpawnAgentForTest(w, '4')
+	a.CurrentStrategy = StrategyScentFollower
+	a.CurrentTrustee = 0 // no formal trustee
+	a.Beliefs = world.NewAgentBeliefs()
+	w.AgentAt[a.Pos.Y][a.Pos.X] = nil
+	a.Pos = world.Pos{X: 40, Y: 40}
+	w.AgentAt[40][40] = a
+	for y := 39; y <= 41; y++ {
+		for x := 39; x <= 41; x++ {
+			w.Maze.Cells[y][x] = world.CellPath
+		}
+	}
+	w.MarkAgentSensed(a)
+	for p := range a.KnownCells {
+		a.Beliefs.SafeFromPit[p] = true
+	}
+	// Plant fresh peer scent at the south neighbor (not own label).
+	w.Cycle = 100
+	south := world.Pos{X: 40, Y: 41}
+	w.ScentOwner[south.Y][south.X] = '2' // peer label
+	w.ScentCycle[south.Y][south.X] = 100
+	got := ScentFollowerStrategy(w, a)
+	if got != south {
+		t.Errorf("opportunistic follow: got %v, want south %v (peer scent)", got, south)
+	}
+	// Opportunistic following should also have been recorded.
+	if !a.OpportunisticFollowed['2'] {
+		t.Errorf("OpportunisticFollowed['2'] not set: %v", a.OpportunisticFollowed)
+	}
+}
+
+// TestScentFollower_TrusteeBonusBeatsTiedPeer: with two equally-fresh
+// scents (trustee at one neighbor, peer at another), the trustee
+// wins because of the multiplicative trusteeBonus.
+func TestScentFollower_TrusteeBonusBeatsTiedPeer(t *testing.T) {
+	w := newConfiguredWorld(631)
+	a := world.SpawnAgentForTest(w, '4')
+	a.CurrentStrategy = StrategyScentFollower
+	a.CurrentTrustee = '2'
+	a.Beliefs = world.NewAgentBeliefs()
+	w.AgentAt[a.Pos.Y][a.Pos.X] = nil
+	a.Pos = world.Pos{X: 40, Y: 40}
+	w.AgentAt[40][40] = a
+	for y := 39; y <= 41; y++ {
+		for x := 39; x <= 41; x++ {
+			w.Maze.Cells[y][x] = world.CellPath
+		}
+	}
+	w.MarkAgentSensed(a)
+	w.Cycle = 100
+	south := world.Pos{X: 40, Y: 41}
+	east := world.Pos{X: 41, Y: 40}
+	// Trustee scent at south, peer at east — both equally fresh.
+	w.ScentOwner[south.Y][south.X] = '2' // trustee
+	w.ScentCycle[south.Y][south.X] = 100
+	w.ScentOwner[east.Y][east.X] = '3' // peer
+	w.ScentCycle[east.Y][east.X] = 100
+	got := ScentFollowerStrategy(w, a)
+	if got != south {
+		t.Errorf("trustee bonus failed: got %v, want trustee-south %v", got, south)
+	}
+}
+
+// TestScentFollower_SkipsOwnScent: U must never pick a cell carrying
+// its own scent, even if it's the freshest thing around.
+func TestScentFollower_SkipsOwnScent(t *testing.T) {
+	w := newConfiguredWorld(632)
+	a := world.SpawnAgentForTest(w, '4')
+	a.CurrentStrategy = StrategyScentFollower
+	a.CurrentTrustee = 0
+	a.Beliefs = world.NewAgentBeliefs()
+	w.AgentAt[a.Pos.Y][a.Pos.X] = nil
+	a.Pos = world.Pos{X: 40, Y: 40}
+	w.AgentAt[40][40] = a
+	for y := 39; y <= 41; y++ {
+		for x := 39; x <= 41; x++ {
+			w.Maze.Cells[y][x] = world.CellPath
+		}
+	}
+	w.MarkAgentSensed(a)
+	// Only own scent on the board.
+	w.Cycle = 100
+	for _, p := range []world.Pos{
+		{X: 41, Y: 40}, {X: 39, Y: 40},
+		{X: 40, Y: 41}, {X: 40, Y: 39},
+	} {
+		w.ScentOwner[p.Y][p.X] = '4' // self
+		w.ScentCycle[p.Y][p.X] = 100
+	}
+	// Should fall through to Bayesian (returns some move via the
+	// planner) rather than chasing own trail.
+	got := ScentFollowerStrategy(w, a)
+	// At minimum: should NOT have set OpportunisticFollowed['4'].
+	if a.OpportunisticFollowed['4'] {
+		t.Errorf("self scent should never be in OpportunisticFollowed")
+	}
+	_ = got
+}
+
 // TestScentFollower_LostScentFallsBackToBayesian: when no cardinal
 // neighbor carries the trustee's scent, the strategy must defer to
 // the Bayesian planner (which can navigate to the goal if perceived
