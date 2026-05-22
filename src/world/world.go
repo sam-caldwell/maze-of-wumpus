@@ -319,6 +319,17 @@ type Agent struct {
 	//                                       update.
 	JourneyTrusteeContactTicks int
 
+	// OpportunisticFollowed is the set of OTHER-AGENT labels whose
+	// scent this agent followed at least once during the current
+	// journey. Strategy U (opportunistic scent-follower) commits a
+	// label to this set every time it picks a scent-driven move
+	// onto a cell whose scent owner isn't the agent itself. On a
+	// successful journey, every label in this set receives a
+	// TrustGoalBonus (and, if the run came in under TTL, the
+	// TrustWithinTTLBonus too). Reset at journey start; cleared
+	// after endJourney consumes it.
+	OpportunisticFollowed map[rune]bool
+
 	// CurrentStrategy is the algorithm letter (R/S/T/U/V/W/X) the
 	// agent is using for THIS journey. Picked at the start of each
 	// life by PickStrategy. Drives action selection through the
@@ -1920,6 +1931,13 @@ func (w *World) RespawnAgents() {
 		if a.RespawnIn != 0 {
 			continue
 		}
+		// Fresh journey starts here. Any stale swarm state carried
+		// over from the previous life (clones that survived to the
+		// goal-collapse, or the prior SwarmGroupID) must be cleared
+		// so maintainSwarmMembership below allocates a brand-new
+		// independent swarm if the agent picks S again.
+		a.SwarmGroupID = 0
+		a.SwarmClones = nil
 		// Each agent spawns at its OWN EntrancePos (assigned once at
 		// world construction by pickAgentEntrances). Falls back to
 		// the maze's canonical entrance when an agent's entry
@@ -1963,6 +1981,7 @@ func (w *World) RespawnAgents() {
 		a.MaxStartDist = 0
 		a.SearchAnim = nil
 		a.JourneyTrusteeContactTicks = 0
+		a.OpportunisticFollowed = nil
 		w.AgentAt[entrance.Y][entrance.X] = a
 		w.MarkAgentSensed(a)
 		a.RespawnIn = -1
@@ -2106,6 +2125,9 @@ func (w *World) CheckGoal() {
 	// Swarm clones reaching the goal credit their leader. We do
 	// this BEFORE the leader-position pass so a swarm can still
 	// score even if the leader itself never reached the goal cell.
+	// The per-leader inner loop breaks after the first clone-at-
+	// goal match so the swarm gets exactly ONE win regardless of
+	// how many clones happen to step onto the goal in the same tick.
 	for _, leader := range w.Agents {
 		if !leader.Alive || leader.SwarmGroupID == 0 || len(leader.SwarmClones) == 0 {
 			continue
@@ -2116,28 +2138,36 @@ func (w *World) CheckGoal() {
 			}
 			// Snap the leader onto the goal cell so the existing
 			// per-agent goal-handling treats this as a leader win.
-			// All clones drop with the leader; on respawn the swarm
-			// reforms with 10 fresh clones.
 			if w.AgentAt[leader.Pos.Y][leader.Pos.X] == leader {
 				w.AgentAt[leader.Pos.Y][leader.Pos.X] = nil
 			}
 			leader.Pos = w.Maze.GoalPos
 			w.AgentAt[leader.Pos.Y][leader.Pos.X] = leader
-			// Mark all clones dead so leader's respawn rebuilds a
-			// fresh swarm rather than carrying old clone positions.
-			for _, c2 := range leader.SwarmClones {
-				if c2 != nil {
-					c2.Alive = false
-				}
-			}
-			leader.SwarmClones = nil
-			leader.SwarmGroupID = 0
+			// Clones STAY ALIVE for the duration of this CheckGoal
+			// call — they'll be visibly collapsed onto the goal in
+			// the per-agent handler below. Stale-swarm cleanup
+			// happens at the leader's next RespawnAgents pass so
+			// the new journey starts with a fresh group ID + 10
+			// fresh clones.
 			break
 		}
 	}
 	for _, a := range w.Agents {
 		if !a.Alive || a.Pos != w.Maze.GoalPos {
 			continue
+		}
+		// Swarm collapse: when an S leader wins (either by walking
+		// onto the goal itself or by having a clone get there), all
+		// alive clones snap onto the goal cell as a single visual
+		// "all together at the finish" pose. The collapse fires
+		// before the win is recorded so the rendering of this tick
+		// shows the assembled swarm at the goal.
+		if a.SwarmGroupID != 0 && len(a.SwarmClones) > 0 {
+			for _, c := range a.SwarmClones {
+				if c != nil && c.Alive {
+					c.Pos = w.Maze.GoalPos
+				}
+			}
 		}
 		a.Stats.GoalsReached++
 		t := a.TicksAlive
@@ -2987,21 +3017,49 @@ const (
 //     came near this agent on this journey).
 func (w *World) endJourney(a *Agent, success bool) {
 	w.updateStrategyTrust(a, success)
-	if !IsScentFollower(a.Label) || a.CurrentTrustee == 0 {
-		return
-	}
-	if a.JourneyTrusteeContactTicks < MinTrusteeContactTicks {
+	if !IsScentFollower(a.Label) {
 		return
 	}
 	if a.TrustScores == nil {
 		a.TrustScores = map[rune]float64{}
+	}
+	// Opportunistic-following credit: on a successful run, every
+	// OTHER-AGENT label whose scent this agent followed at least
+	// once during the journey gets a TrustGoalBonus (plus the
+	// within-TTL bonus if applicable). This is independent of the
+	// CurrentTrustee contact gate — opportunistic followings count
+	// even when no formal trustee was set.
+	if success {
+		ttlBudget := a.OptimalDistance
+		if ttlBudget <= 0 {
+			ttlBudget = w.Stats.OptimalDistance
+		}
+		optimalTTL := TTLMultiplier * ttlBudget
+		withinTTL := optimalTTL > 0 && a.TicksAlive > 0 && a.TicksAlive <= optimalTTL
+		for owner := range a.OpportunisticFollowed {
+			if owner == a.CurrentTrustee {
+				continue // trustee gets its own credit below
+			}
+			a.TrustScores[owner] += TrustGoalBonus
+			if withinTTL {
+				a.TrustScores[owner] += TrustWithinTTLBonus
+			}
+		}
+	}
+	// CurrentTrustee credit: gated on the existing contact threshold
+	// — the trustee isn't blamed (or credited) when the agent never
+	// actually sniffed them during the journey.
+	if a.CurrentTrustee == 0 {
+		return
+	}
+	if a.JourneyTrusteeContactTicks < MinTrusteeContactTicks {
+		return
 	}
 	if !success {
 		a.TrustScores[a.CurrentTrustee] -= TrustFailurePenalty
 		return
 	}
 	a.TrustScores[a.CurrentTrustee] += TrustGoalBonus
-	// Use the per-agent TTL ceiling, matching the kill rule's check.
 	ttlBudget := a.OptimalDistance
 	if ttlBudget <= 0 {
 		ttlBudget = w.Stats.OptimalDistance
