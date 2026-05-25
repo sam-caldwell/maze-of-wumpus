@@ -117,14 +117,15 @@ func bfsTowardKnown(w *world.World, a *world.Agent, from, to world.Pos) []world.
 
 // BFSToward returns a hazard-avoiding shortest path from `from` to
 // `to` over the full (omniscient) walkable graph. Used by R (BFS)
-// for goal/water routing. Backed by Dijkstra with 8-conn weighting
-// and corner-clipping; "BFS" is kept in the name for historical
-// continuity.
+// for goal/water routing. Backed by A* with octile heuristic on the
+// 10/14-weighted 8-conn grid; identical optimal cost as Dijkstra,
+// but fewer cells expanded on the large board. "BFS" is kept in
+// the name for historical continuity at the call sites.
 func BFSToward(w *world.World, from, to world.Pos) []world.Pos {
 	if from == to {
 		return nil
 	}
-	return w.DijkstraPath(from, to, func(p world.Pos) bool {
+	return w.AStarPath(from, to, func(p world.Pos) bool {
 		if !w.Maze.IsWalkable(p) {
 			return false
 		}

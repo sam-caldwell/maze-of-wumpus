@@ -576,6 +576,191 @@ func TestGlyphAt_GhostsHiddenForDisabledAgent(t *testing.T) {
 	}
 }
 
+// TestUpdate_ArrowKeysScrollMazeViewport: arrow keys bump offsetX /
+// offsetY by one cell, clamped to [0, BoardWidth/Height − viewport].
+// With no WindowSizeMsg the viewport equals the full board, so the
+// max offsets are 0 in both dims — every arrow press is a no-op.
+func TestUpdate_ArrowKeysScrollMazeViewport(t *testing.T) {
+	m := newTestModel(1)
+	// Resize so the viewport is smaller than the board, otherwise
+	// clamp would pin offsets to zero.
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: 40})
+	m = m2.(Model)
+	if m.offsetX != 0 || m.offsetY != 0 {
+		t.Fatalf("initial offsets should be (0,0), got (%d,%d)", m.offsetX, m.offsetY)
+	}
+	m3, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = m3.(Model)
+	if m.offsetX != 1 {
+		t.Errorf("right arrow → offsetX = %d, want 1", m.offsetX)
+	}
+	m4, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = m4.(Model)
+	if m.offsetY != 1 {
+		t.Errorf("down arrow → offsetY = %d, want 1", m.offsetY)
+	}
+	// Left at offsetX=1 → 0. A second left should clamp at 0.
+	m5, _ := m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	m = m5.(Model)
+	if m.offsetX != 0 {
+		t.Errorf("left arrow → offsetX = %d, want 0", m.offsetX)
+	}
+	m6, _ := m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	m = m6.(Model)
+	if m.offsetX != 0 {
+		t.Errorf("left arrow at 0 should clamp, got offsetX = %d", m.offsetX)
+	}
+}
+
+// TestUpdate_ShiftArrowKeysPageScroll: shift+arrow jumps the maze
+// viewport by a full page (the viewport dimension), while a plain
+// arrow moves one cell. Verifies the page jump equals viewW/viewH.
+func TestUpdate_ShiftArrowKeysPageScroll(t *testing.T) {
+	m := newTestModel(1)
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: 40})
+	m = m2.(Model)
+	viewW, viewH := m.currentViewSize()
+	if viewW <= 1 || viewH <= 1 {
+		t.Fatalf("viewport too small to test paging: (%d,%d)", viewW, viewH)
+	}
+	// shift+down jumps one page vertically.
+	m3, _ := m.Update(tea.KeyMsg{Type: tea.KeyShiftDown})
+	m = m3.(Model)
+	if m.offsetY != viewH {
+		t.Errorf("shift+down → offsetY = %d, want %d (one page)", m.offsetY, viewH)
+	}
+	// shift+right jumps one page horizontally.
+	m4, _ := m.Update(tea.KeyMsg{Type: tea.KeyShiftRight})
+	m = m4.(Model)
+	if m.offsetX != viewW {
+		t.Errorf("shift+right → offsetX = %d, want %d (one page)", m.offsetX, viewW)
+	}
+	// shift+up from one page down returns to the top (clamped at 0).
+	m5, _ := m.Update(tea.KeyMsg{Type: tea.KeyShiftUp})
+	m = m5.(Model)
+	if m.offsetY != 0 {
+		t.Errorf("shift+up → offsetY = %d, want 0", m.offsetY)
+	}
+	// shift+left from one page right returns to the left edge.
+	m6, _ := m.Update(tea.KeyMsg{Type: tea.KeyShiftLeft})
+	m = m6.(Model)
+	if m.offsetX != 0 {
+		t.Errorf("shift+left → offsetX = %d, want 0", m.offsetX)
+	}
+}
+
+// TestUpdate_PageKeysScrollVertically: PgUp / PgDn jump the maze
+// viewport a full page vertically. These are the reliable vertical-
+// page keys for terminals that intercept shift+↑/↓ and forward a
+// bare arrow instead.
+func TestUpdate_PageKeysScrollVertically(t *testing.T) {
+	m := newTestModel(1)
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: 40})
+	m = m2.(Model)
+	_, viewH := m.currentViewSize()
+	if viewH <= 1 {
+		t.Fatalf("viewport too short to test paging: %d", viewH)
+	}
+	m3, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	m = m3.(Model)
+	if m.offsetY != viewH {
+		t.Errorf("pgdown → offsetY = %d, want %d (one page)", m.offsetY, viewH)
+	}
+	m4, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	m = m4.(Model)
+	if m.offsetY != 0 {
+		t.Errorf("pgup → offsetY = %d, want 0", m.offsetY)
+	}
+}
+
+// TestUpdate_ShiftArrowClampsAtBoardEdge: a single page jump never
+// pushes the viewport past the board edge.
+func TestUpdate_ShiftArrowClampsAtBoardEdge(t *testing.T) {
+	m := newTestModel(1)
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: 40})
+	m = m2.(Model)
+	viewW, viewH := m.currentViewSize()
+	maxX := world.BoardWidth - viewW
+	maxY := world.BoardHeight - viewH
+	// Spam shift+down / shift+right well past the edge.
+	for i := 0; i < world.BoardHeight; i++ {
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyShiftDown})
+		m = next.(Model)
+		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftRight})
+		m = next.(Model)
+	}
+	if m.offsetY != maxY {
+		t.Errorf("offsetY after paging to edge = %d, want %d", m.offsetY, maxY)
+	}
+	if m.offsetX != maxX {
+		t.Errorf("offsetX after paging to edge = %d, want %d", m.offsetX, maxX)
+	}
+}
+
+// TestUpdate_ArrowKeysClampToBoardEdge: spamming arrows past the
+// board edge should stop at the maximum offset (board dim minus
+// viewport dim).
+func TestUpdate_ArrowKeysClampToBoardEdge(t *testing.T) {
+	m := newTestModel(1)
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: 40})
+	m = m2.(Model)
+	for i := 0; i < world.BoardWidth+10; i++ {
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+		m = next.(Model)
+	}
+	if m.offsetX <= 0 || m.offsetX > world.BoardWidth {
+		t.Errorf("offsetX after spam = %d, expected clamped > 0 and ≤ BoardWidth", m.offsetX)
+	}
+	for i := 0; i < world.BoardHeight+10; i++ {
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		m = next.(Model)
+	}
+	if m.offsetY <= 0 || m.offsetY > world.BoardHeight {
+		t.Errorf("offsetY after spam = %d, expected clamped > 0 and ≤ BoardHeight", m.offsetY)
+	}
+}
+
+// TestUpdate_ReseedResetsOffsets: reseeding via 'r' should snap the
+// maze viewport back to the top-left corner.
+func TestUpdate_ReseedResetsOffsets(t *testing.T) {
+	m := newTestModel(1)
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: 40})
+	m = m2.(Model)
+	m3, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = m3.(Model)
+	if m.offsetX == 0 {
+		t.Fatal("offsetX should be > 0 after a right-arrow press")
+	}
+	m4, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	m = m4.(Model)
+	if m.offsetX != 0 || m.offsetY != 0 {
+		t.Errorf("reseed should reset offsets to (0,0), got (%d,%d)",
+			m.offsetX, m.offsetY)
+	}
+}
+
+// TestUpdate_WindowSizeMsgReclampsOffsets: shrinking the terminal so
+// the previously-valid offset would push the viewport off the board
+// must re-clamp offsets back into range.
+func TestUpdate_WindowSizeMsgReclampsOffsets(t *testing.T) {
+	m := newTestModel(1)
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: 40})
+	m = m2.(Model)
+	for i := 0; i < 30; i++ {
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+		m = next.(Model)
+	}
+	preMax := m.offsetX
+	// Re-resize to the full-board fallback: viewport = board, so the
+	// only valid offset is 0.
+	m3, _ := m.Update(tea.WindowSizeMsg{Width: 0, Height: 0})
+	m = m3.(Model)
+	if m.offsetX != 0 {
+		t.Errorf("offset should re-clamp to 0 when viewport grows to whole board, got %d (was %d)",
+			m.offsetX, preMax)
+	}
+}
+
 func TestTickEvery(t *testing.T) {
 	cmd := tickEvery(1 * time.Millisecond)
 	if cmd == nil {

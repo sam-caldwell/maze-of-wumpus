@@ -162,6 +162,15 @@ type Model struct {
 	World    *world.World
 	ShowPath bool
 	build    WorldBuilder
+
+	// Terminal dims learned from tea.WindowSizeMsg; zero before the
+	// first resize event (e.g. unit tests that never send one). When
+	// zero, the renderer falls back to showing the whole board.
+	termW, termH int
+	// Maze viewport top-left corner in board coordinates. Arrow keys
+	// bump these by one cell; clamped to keep the viewport inside
+	// [0, BoardWidth] × [0, BoardHeight]. Reset to (0, 0) on reseed.
+	offsetX, offsetY int
 }
 
 // NewModel constructs a Model. `builder` is the function that turns a
@@ -182,10 +191,48 @@ func (m Model) Init() tea.Cmd {
 // Update handles keyboard / tick messages.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.termW = msg.Width
+		m.termH = msg.Height
+		m.clampOffsets()
+		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
+		case "up":
+			m.offsetY--
+			m.clampOffsets()
+		case "down":
+			m.offsetY++
+			m.clampOffsets()
+		case "left":
+			m.offsetX--
+			m.clampOffsets()
+		case "right":
+			m.offsetX++
+			m.clampOffsets()
+		case "shift+up", "pgup":
+			// PgUp/PgDn are the reliable vertical-page keys: many
+			// terminals intercept shift+↑/↓ (line-select / scrollback)
+			// and forward a bare ↑/↓, so shift alone can't be trusted
+			// for vertical paging. shift+↑/↓ stay bound for terminals
+			// that do forward them.
+			_, viewH := m.currentViewSize()
+			m.offsetY -= viewH
+			m.clampOffsets()
+		case "shift+down", "pgdown":
+			_, viewH := m.currentViewSize()
+			m.offsetY += viewH
+			m.clampOffsets()
+		case "shift+left":
+			viewW, _ := m.currentViewSize()
+			m.offsetX -= viewW
+			m.clampOffsets()
+		case "shift+right":
+			viewW, _ := m.currentViewSize()
+			m.offsetX += viewW
+			m.clampOffsets()
 		case "r":
 			m.reseedPreservingLearning()
 		case "s":
@@ -254,6 +301,7 @@ const StatsDir = "build/stats"
 func (m *Model) reseedPreservingLearning() {
 	prev := m.World.Agents
 	m.World = m.build(time.Now().UnixNano())
+	m.offsetX, m.offsetY = 0, 0
 	for i, oldA := range prev {
 		if i >= len(m.World.Agents) {
 			break
@@ -276,8 +324,29 @@ func (m *Model) reseedPreservingLearning() {
 	}
 }
 
-// View renders the model: title + grid + per-agent status + footer.
+// View composes the four panes — header, maze (scrollable), right
+// (trust matrix + info), bottom (per-agent stats + status / keys) —
+// into a single frame. Only the maze pane scrolls; the others are
+// pure projections of world state.
 func (m Model) View() string {
+	right := m.renderRightPane()
+	rightW := paneWidth(right)
+	mazeW, mazeH := m.mazeViewSize(rightW)
+	body := lipgloss.JoinHorizontal(lipgloss.Top,
+		m.renderMazePane(mazeW, mazeH),
+		"  ",
+		right,
+	)
+	return lipgloss.JoinVertical(lipgloss.Left,
+		m.renderHeader(),
+		body,
+		m.renderBottomPane(),
+	)
+}
+
+// renderHeader is the top line: title, GOALS banner (when any agent
+// has reached a goal), and the current seed.
+func (m Model) renderHeader() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("Maze of Wumpus"))
 	totalGoals := 0
@@ -290,27 +359,51 @@ func (m Model) View() string {
 	}
 	b.WriteString("  ")
 	b.WriteString(statStyle.Render(fmt.Sprintf("Seed: %d", m.World.Seed)))
-	b.WriteString("\n")
-	matrixLines := renderTrustMatrixLines(m.World)
-	for y := 0; y < world.BoardHeight; y++ {
-		for x := 0; x < world.BoardWidth; x++ {
+	return b.String()
+}
+
+// renderMazePane emits exactly viewH lines of viewW cells starting at
+// (offsetX, offsetY) in board coordinates. The ShowPath highlight is
+// applied per-cell as it was in the pre-pane View().
+func (m Model) renderMazePane(viewW, viewH int) string {
+	var b strings.Builder
+	for row := 0; row < viewH; row++ {
+		y := m.offsetY + row
+		if y >= world.BoardHeight {
+			break
+		}
+		for col := 0; col < viewW; col++ {
+			x := m.offsetX + col
+			if x >= world.BoardWidth {
+				break
+			}
 			g := m.glyphAt(m.World, x, y)
 			if m.ShowPath && m.World.ShortestPathCells[world.Pos{X: x, Y: y}] {
 				g = "\x1b[43m" + g + "\x1b[49m"
 			}
 			b.WriteString(g)
 		}
-		// Splice the trust matrix to the right of the first
-		// len(matrixLines) maze rows. Falls off after that.
-		if y < len(matrixLines) {
-			b.WriteString("  ")
-			b.WriteString(matrixLines[y])
+		if row < viewH-1 {
+			b.WriteByte('\n')
 		}
-		b.WriteString("\n")
 	}
+	return b.String()
+}
+
+// renderRightPane is the trust matrix + companion info, rendered as
+// an isolated column. Pure projection of world state; never scrolls.
+func (m Model) renderRightPane() string {
+	return strings.Join(renderTrustMatrixLines(m.World), "\n")
+}
+
+// renderBottomPane is the per-agent stats feed plus the global status
+// / keybindings footer. Rendered as a single block below the maze and
+// right panes.
+func (m Model) renderBottomPane() string {
+	var b strings.Builder
 	for _, a := range m.World.Agents {
 		b.WriteString(statStyle.Render(m.formatAgentStats(a)))
-		b.WriteString("\n")
+		b.WriteByte('\n')
 	}
 	pathsStr := fmt.Sprintf("%d", m.World.Stats.ShortestPaths)
 	if m.World.Stats.ShortestPaths >= world.MaxShortestPathsCount {
@@ -328,16 +421,92 @@ func (m Model) View() string {
 	if m.World.TTLDisabled {
 		ttlState = "OFF"
 	}
-	// TTL is now per-agent (see Agent.OptimalDistance × TTLMultiplier)
-	// — surfaced in the per-agent stats line rather than the global
-	// status bar.
 	b.WriteString(statStyle.Render(
-		fmt.Sprintf("Cycle %5d | Paths: %s | W killed: %d | wumpus:%s pits:%s ttl:%s\n[q]uit [r]eseed [s]how-path [w]umpus [f]ire/water [t]tl [1..9 a..c] agent",
+		fmt.Sprintf("Cycle %5d | Paths: %s | W killed: %d | wumpus:%s pits:%s ttl:%s\n[q]uit [r]eseed [s]how-path [w]umpus [f]ire/water [t]tl [↑↓←→] scroll [pgup/pgdn,⇧←→] page [1..9 a..c] agent",
 			m.World.Cycle,
 			pathsStr, m.World.Stats.WumpusDied,
 			wumpState, pitState, ttlState),
 	))
 	return b.String()
+}
+
+// paneWidth returns the visible width (ANSI-stripped) of the widest
+// line in `s`. Used to size the right pane so the maze viewport can
+// claim whatever terminal width remains.
+func paneWidth(s string) int {
+	max := 0
+	for _, line := range strings.Split(s, "\n") {
+		if w := lipgloss.Width(line); w > max {
+			max = w
+		}
+	}
+	return max
+}
+
+// mazeViewSize computes the maze viewport size from the terminal
+// dimensions, leaving room for the right pane (rightW + 2-col gutter)
+// horizontally and for the header + bottom pane vertically. Falls
+// back to the full board when the terminal size is unknown (the
+// pre-resize state, hit by tests that never send a WindowSizeMsg).
+func (m Model) mazeViewSize(rightW int) (w, h int) {
+	if m.termW == 0 || m.termH == 0 {
+		return world.BoardWidth, world.BoardHeight
+	}
+	const gutter = 2
+	bottomH := len(m.World.Agents) + 2 // agent rows + 2-line footer
+	headerH := 1
+	w = m.termW - rightW - gutter
+	h = m.termH - headerH - bottomH
+	if w < 1 {
+		w = 1
+	}
+	if h < 1 {
+		h = 1
+	}
+	if w > world.BoardWidth {
+		w = world.BoardWidth
+	}
+	if h > world.BoardHeight {
+		h = world.BoardHeight
+	}
+	return
+}
+
+// currentViewSize returns the maze viewport's (width, height) in
+// cells for the current terminal size. Wraps the right-pane width
+// measurement + mazeViewSize so the arrow-key handlers and
+// clampOffsets share one source of truth for "how big is a page."
+func (m Model) currentViewSize() (int, int) {
+	rightW := paneWidth(m.renderRightPane())
+	return m.mazeViewSize(rightW)
+}
+
+// clampOffsets keeps (offsetX, offsetY) within
+// [0, BoardWidth-viewW] × [0, BoardHeight-viewH]. Called after every
+// arrow-key bump and after a WindowSizeMsg (since shrinking the
+// terminal may push a previously-valid offset out of range).
+func (m *Model) clampOffsets() {
+	viewW, viewH := m.currentViewSize()
+	maxX := world.BoardWidth - viewW
+	maxY := world.BoardHeight - viewH
+	if maxX < 0 {
+		maxX = 0
+	}
+	if maxY < 0 {
+		maxY = 0
+	}
+	if m.offsetX > maxX {
+		m.offsetX = maxX
+	}
+	if m.offsetY > maxY {
+		m.offsetY = maxY
+	}
+	if m.offsetX < 0 {
+		m.offsetX = 0
+	}
+	if m.offsetY < 0 {
+		m.offsetY = 0
+	}
 }
 
 // lastSolveTier classifies the agent's most recent solve time against

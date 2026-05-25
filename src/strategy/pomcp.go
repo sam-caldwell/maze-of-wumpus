@@ -22,7 +22,7 @@
 //     by safety × (1 + DistFromStart). Rollouts naturally drift
 //     away from the entrance into unexplored terrain.
 //
-// Tradeoff: without a goal-direction signal, rollouts in a 120×80
+// Tradeoff: without a goal-direction signal, rollouts in a large
 // maze rarely stumble onto the goal randomly. Convergence is slower
 // than goal-aware POMCP but it's a faithful POMDP-under-PO setup —
 // agent 7 effectively becomes "explore outward, sometimes get

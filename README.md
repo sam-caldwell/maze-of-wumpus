@@ -57,6 +57,7 @@ tests, `go vet`, and `gofmt` pass.
 - [Make targets](#make-targets)
 - [Determinism](#determinism)
 - [Constants reference](#constants-reference)
+- [License](#license)
 
 ---
 
@@ -1043,3 +1044,9 @@ unit + integration + e2e tests, and the build — and `make coverage`
 prints per-function coverage. Run `./build/maze-of-wumpus` (or `make
 run`) to watch twelve agents argue with each other across twelve doors
 about who really has the optimal strategy.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE). Copyright (c) 2026 Sam Caldwell.

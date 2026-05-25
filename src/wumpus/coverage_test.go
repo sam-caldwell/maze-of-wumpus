@@ -244,6 +244,87 @@ func TestRandomNeighbor_AllBlockedReturnsSelf(t *testing.T) {
 	}
 }
 
+// TestSeekOrPatrol_OutsideRadiusHeadsTowardGoal: a wumpus far from
+// the goal must take a step that REDUCES its Manhattan distance to
+// the goal — it should be planning toward gold, not wandering.
+func TestSeekOrPatrol_OutsideRadiusHeadsTowardGoal(t *testing.T) {
+	w := newConfiguredWorld(400)
+	wm := &world.Wumpus{Pos: world.Pos{X: 10, Y: 10}, Alive: true}
+	w.WumpusAt[wm.Pos.Y][wm.Pos.X] = wm
+	// Carve a clear path from (10,10) toward (40,40) so Dijkstra
+	// has somewhere to plan.
+	w.Maze.GoalPos = world.Pos{X: 40, Y: 40}
+	for y := 10; y <= 40; y++ {
+		for x := 10; x <= 40; x++ {
+			w.Maze.Cells[y][x] = world.CellPath
+		}
+	}
+	w.Maze.Cells[w.Maze.GoalPos.Y][w.Maze.GoalPos.X] = world.CellGoal
+	before := world.AbsInt(wm.Pos.X-w.Maze.GoalPos.X) +
+		world.AbsInt(wm.Pos.Y-w.Maze.GoalPos.Y)
+	if before <= WumpusGoalPatrolRadius {
+		t.Fatalf("test setup: wumpus already inside patrol radius (d=%d)", before)
+	}
+	got := seekOrPatrol(w, wm)
+	after := world.AbsInt(got.X-w.Maze.GoalPos.X) +
+		world.AbsInt(got.Y-w.Maze.GoalPos.Y)
+	if after >= before {
+		t.Errorf("seekOrPatrol didn't head toward goal: d went %d → %d", before, after)
+	}
+}
+
+// TestSeekOrPatrol_InsideRadiusWanders: when the wumpus is already
+// within the patrol radius, seekOrPatrol should defer to
+// RandomNeighbor (no forced goal-step). We test by asserting the
+// returned cell is Moore-adjacent and the function doesn't crash.
+func TestSeekOrPatrol_InsideRadiusWanders(t *testing.T) {
+	w := newConfiguredWorld(401)
+	w.Maze.GoalPos = world.Pos{X: 40, Y: 40}
+	wm := &world.Wumpus{Pos: world.Pos{X: 42, Y: 42}, Alive: true} // d=4 inside radius
+	w.WumpusAt[wm.Pos.Y][wm.Pos.X] = wm
+	for y := 39; y <= 43; y++ {
+		for x := 39; x <= 43; x++ {
+			w.Maze.Cells[y][x] = world.CellPath
+		}
+	}
+	got := seekOrPatrol(w, wm)
+	dx := got.X - wm.Pos.X
+	dy := got.Y - wm.Pos.Y
+	if got != wm.Pos && (dx < -1 || dx > 1 || dy < -1 || dy > 1) {
+		t.Errorf("inside-radius patrol returned non-neighbor %v from %v", got, wm.Pos)
+	}
+}
+
+// TestBayesianHunt_FallbackSeeksGoal: when commitsToHunt fires false
+// (aggressiveness=0), bayesianHunt's fallback must seek-toward-goal
+// rather than random-wander. Position the wumpus far from goal so
+// the seek path is observable.
+func TestBayesianHunt_FallbackSeeksGoal(t *testing.T) {
+	w := newConfiguredWorld(402)
+	w.Maze.GoalPos = world.Pos{X: 40, Y: 40}
+	for y := 10; y <= 40; y++ {
+		for x := 10; x <= 40; x++ {
+			w.Maze.Cells[y][x] = world.CellPath
+		}
+	}
+	wm := &world.Wumpus{
+		Pos:            world.Pos{X: 10, Y: 10},
+		Alive:          true,
+		Aggressiveness: 0, // never commits to hunt
+		HuntMode:       world.WumpusHuntBayesian,
+	}
+	w.WumpusAt[wm.Pos.Y][wm.Pos.X] = wm
+	got := bayesianHunt(w, wm)
+	before := world.AbsInt(wm.Pos.X-w.Maze.GoalPos.X) +
+		world.AbsInt(wm.Pos.Y-w.Maze.GoalPos.Y)
+	after := world.AbsInt(got.X-w.Maze.GoalPos.X) +
+		world.AbsInt(got.Y-w.Maze.GoalPos.Y)
+	if after >= before {
+		t.Errorf("non-pursuing bayesianHunt didn't seek goal: d went %d → %d",
+			before, after)
+	}
+}
+
 // TestIsAgentLabel_AllBranches covers each branch (renamed to avoid
 // collision with the existing TestIsAgentLabel in wumpus_test.go).
 func TestIsAgentLabel_AllBranches(t *testing.T) {

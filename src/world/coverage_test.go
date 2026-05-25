@@ -936,7 +936,8 @@ func TestRecomputeAgentPrunedView_DirectCall(t *testing.T) {
 func TestInitAgentEntrance_DirectCall(t *testing.T) {
 	w := NewWorld(136)
 	a := &Agent{Label: 'Z'}
-	w.initAgentEntrance(a, w.Maze.EntrancePos)
+	costFromGoal := w.computeCostFromGoal()
+	w.initAgentEntrance(a, w.Maze.EntrancePos, costFromGoal)
 	if a.EntrancePos != w.Maze.EntrancePos {
 		t.Errorf("EntrancePos = %v, want %v", a.EntrancePos, w.Maze.EntrancePos)
 	}
@@ -1027,21 +1028,26 @@ func TestPickAgentEntrances_DistinctOnDifferentSeeds(t *testing.T) {
 	}
 }
 
-// TestSwarmCloneSpawn_BumpsStartedByCloneCount: forming a fresh
-// swarm should bump StrategyPerf[S].Started by SwarmClonesPerLeader
-// in addition to the leader's own per-agent bump in RespawnAgents.
-// Each clone is its own startable run.
-func TestSwarmCloneSpawn_BumpsStartedByCloneCount(t *testing.T) {
+// TestSwarmCloneSpawn_StartedCountsSwarmAsOne: a swarm is a single
+// unified entity for run-counting. Spawning the clones via
+// maintainSwarmMembership must NOT bump StrategyPerf[S].Started —
+// the swarm's single run is counted by the leader's per-agent bump
+// in RespawnAgents, not once per clone. This keeps #Runs consistent
+// with the outcome columns (which fire once per swarm).
+func TestSwarmCloneSpawn_StartedCountsSwarmAsOne(t *testing.T) {
 	w := NewWorld(316)
 	w.ensureStrategyPerf(SwarmStrategyLetter).Started = 0 // reset baseline
 	a := w.AgentByLabel('3')
 	a.CurrentStrategy = SwarmStrategyLetter
 	a.SwarmGroupID = 0
 	w.maintainSwarmMembership(a)
-	got := w.StrategyPerf[SwarmStrategyLetter].Started
-	if got != SwarmClonesPerLeader {
-		t.Errorf("Started bumped by %d, want %d (one per clone)",
-			got, SwarmClonesPerLeader)
+	// Clones still materialize (the swarm has a body)...
+	if len(a.SwarmClones) != SwarmClonesPerLeader {
+		t.Errorf("clones = %d, want %d", len(a.SwarmClones), SwarmClonesPerLeader)
+	}
+	// ...but they add nothing to the run count.
+	if got := w.StrategyPerf[SwarmStrategyLetter].Started; got != 0 {
+		t.Errorf("Started bumped by %d, want 0 (swarm counts as one entity)", got)
 	}
 }
 

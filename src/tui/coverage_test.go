@@ -181,15 +181,17 @@ func TestFormatAgentStats_TTLColumnIsPerAgent(t *testing.T) {
 // function fires at per-agent ratios — independent of the world-wide
 // Stats.OptimalDistance.
 func TestDistSeverity_PerAgentTTL(t *testing.T) {
-	// Agent with a tight per-agent TTL cap = 50.
-	perAgentCap := world.TTLMultiplier * 10
-	if got := distSeverity(45, perAgentCap); got != 2 {
+	// Pick an OptimalDistance × TTLMultiplier large enough that the
+	// per-tier ratios round cleanly. Values are derived from the cap
+	// so the assertions stay correct if TTLMultiplier is retuned.
+	perAgentCap := world.TTLMultiplier * 100
+	if got := distSeverity(perAgentCap*90/100, perAgentCap); got != 2 {
 		t.Errorf("90%% of per-agent cap should be danger (severity 2), got %d", got)
 	}
-	if got := distSeverity(38, perAgentCap); got != 1 {
+	if got := distSeverity(perAgentCap*76/100, perAgentCap); got != 1 {
 		t.Errorf("76%% of per-agent cap should be warn (severity 1), got %d", got)
 	}
-	if got := distSeverity(20, perAgentCap); got != 0 {
+	if got := distSeverity(perAgentCap*40/100, perAgentCap); got != 0 {
 		t.Errorf("40%% of per-agent cap should be normal (severity 0), got %d", got)
 	}
 }

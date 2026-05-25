@@ -1686,10 +1686,15 @@ func TestEndJourney_SuccessAndTTL(t *testing.T) {
 // took longer than optimalTTL only earns the goal bonus.
 func TestEndJourney_SuccessButNotWithinTTL(t *testing.T) {
 	w := NewWorld(501)
-	w.Stats.OptimalDistance = 100 // optimalTTL = 500
 	a := SpawnAgentForTest(w, '4')
+	// Pin a.OptimalDistance (which takes precedence over
+	// w.Stats.OptimalDistance in endJourney's ttlBudget choice) so
+	// the optimalTTL is small enough that TicksAlive=9999 reliably
+	// blows past it on any board size.
+	a.OptimalDistance = 100
+	w.Stats.OptimalDistance = 100
 	a.CurrentTrustee = '1'
-	a.TicksAlive = 9999 // > optimalTTL
+	a.TicksAlive = 9999 // > TTLMultiplier * 100 = optimalTTL
 	a.JourneyTrusteeContactTicks = MinTrusteeContactTicks
 	w.endJourney(a, true)
 	got := a.TrustScores['1']

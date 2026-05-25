@@ -84,40 +84,87 @@ func commitsToHunt(w *world.World, wm *world.Wumpus) bool {
 	return w.Rng.Float64() < float64(wm.Aggressiveness)/float64(world.WumpusAggressionMax)
 }
 
+// WumpusGoalPatrolRadius bounds the Manhattan distance a wumpus may
+// drift from the goal cell when it's not actively pursuing an agent.
+// Wumpus that find themselves farther than this from the goal will
+// Dijkstra-plan a step BACK toward gold; wumpus already within the
+// radius do a random local wander to ambush approaching agents.
+const WumpusGoalPatrolRadius = 20
+
+// seekOrPatrol is the fallback movement used by every hunt mode
+// when the wumpus is NOT actively pursuing an agent. Implements
+// "inductive bayesian reasoning to seek out gold" via a shortest-
+// path step toward `w.Maze.GoalPos` (Dijkstra over walkable, non-
+// blocked cells), AND the "remain within 20 steps of gold after
+// finding it" rule via the Manhattan-distance gate. Once the
+// wumpus is inside the patrol radius, it switches to random local
+// wander — staying in the gold's neighborhood without leaving.
+func seekOrPatrol(w *world.World, wm *world.Wumpus) world.Pos {
+	d := world.AbsInt(wm.Pos.X-w.Maze.GoalPos.X) +
+		world.AbsInt(wm.Pos.Y-w.Maze.GoalPos.Y)
+	if d > WumpusGoalPatrolRadius {
+		if step := goalStep(w, wm); step != wm.Pos {
+			return step
+		}
+	}
+	return RandomNeighbor(w, wm)
+}
+
+// goalStep returns the first cell on a Dijkstra-shortest path from
+// the wumpus to the goal, gating intermediate cells through
+// blocked() so we don't route through walls, fire pits, or other
+// wumpus. Returns wm.Pos when no path exists (caller falls back to
+// random wander).
+func goalStep(w *world.World, wm *world.Wumpus) world.Pos {
+	path := w.DijkstraPath(wm.Pos, w.Maze.GoalPos, func(p world.Pos) bool {
+		if p == w.Maze.GoalPos {
+			return true
+		}
+		return !blocked(w, p, wm)
+	})
+	if len(path) == 0 {
+		return wm.Pos
+	}
+	return path[0]
+}
+
 // bayesianHunt: per-tick, with probability Aggressiveness/MAX, move
-// toward the strongest local agent scent; otherwise random wander.
+// toward the strongest local agent scent. When not pursuing, fall
+// back to seek-or-patrol — actively head toward gold (or wander
+// within 20 cells of it).
 func bayesianHunt(w *world.World, wm *world.Wumpus) world.Pos {
 	if commitsToHunt(w, wm) {
 		if p := strongestAgentScentMove(w, wm); p != wm.Pos {
 			return p
 		}
 	}
-	return RandomNeighbor(w, wm)
+	return seekOrPatrol(w, wm)
 }
 
 // wanderHunt: random-leaning. Even at full aggressiveness, only
-// half of the commits actually follow scent — the rest random
-// wander. This keeps wander-hunters exploratory.
+// half of the commits actually follow scent. When not following
+// scent, fall back to seek-or-patrol so even the wanderers
+// gravitate toward gold and ambush there.
 func wanderHunt(w *world.World, wm *world.Wumpus) world.Pos {
 	if commitsToHunt(w, wm) && w.Rng.Float64() < 0.5 {
 		if p := strongestAgentScentMove(w, wm); p != wm.Pos {
 			return p
 		}
 	}
-	return RandomNeighbor(w, wm)
+	return seekOrPatrol(w, wm)
 }
 
 // crowdHunt: aggregate detections across all alive crowd-hunt
 // wumpus, then BFS-route this wumpus toward the nearest detection.
-// Falls back to wander-hunt when no agent is in the shared sighting
-// pool.
+// When no agent is in the shared sighting pool, OR aggressiveness
+// gates the commit off, fall back to seek-or-patrol toward gold.
 func crowdHunt(w *world.World, wm *world.Wumpus) world.Pos {
 	sights := crowdSightings(w)
 	if len(sights) == 0 {
-		return wanderHunt(w, wm)
+		return seekOrPatrol(w, wm)
 	}
 	if !commitsToHunt(w, wm) {
-		return RandomNeighbor(w, wm)
+		return seekOrPatrol(w, wm)
 	}
 	nearest := sights[0]
 	bestDist := world.AbsInt(nearest.X-wm.Pos.X) + world.AbsInt(nearest.Y-wm.Pos.Y)
@@ -130,7 +177,7 @@ func crowdHunt(w *world.World, wm *world.Wumpus) world.Pos {
 	}
 	path := bfsTo(w, wm, nearest)
 	if len(path) == 0 {
-		return RandomNeighbor(w, wm)
+		return seekOrPatrol(w, wm)
 	}
 	return path[0]
 }

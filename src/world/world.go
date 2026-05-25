@@ -58,7 +58,7 @@ const DefaultSmellRadius = 2
 // 100 is generous but NOT omniscience: sight is strictly wall-
 // respecting. In a typical maze with twisty corridors the agent
 // perceives only its current wall-connected component out to 100
-// steps — usually a small fraction of the 9600-cell board. In the
+// steps — a tiny fraction of the ~1M-cell board. In the
 // open-field maze variant (or in large rooms) the same radius
 // covers most of the reachable space because there are no walls
 // to stop propagation. R (omniscient BFS) keeps its perception
@@ -68,7 +68,7 @@ const DefaultSightRadius = 100
 
 // TTLMultiplier: an agent dies if its current-attempt ActualDistance
 // exceeds TTLMultiplier × OptimalDistance.
-const TTLMultiplier = 5
+const TTLMultiplier = 3
 
 // ExplorationBonus is the one-time reward credited to RL agents the
 // first time they enter a cell each life.
@@ -895,11 +895,21 @@ func NewWorldWithConfig(cfg Config) *World {
 	// every agent if the picker can't satisfy 12 distinct entries
 	// (extremely rare; the perimeter is ~400 cells).
 	entries := w.pickAgentEntrances(len(w.Agents))
+	// One goal-rooted Dijkstra here serves every per-agent OptimalDistance
+	// / ShortestPath derivation that follows, replacing what used to be
+	// 2N full-grid Dijkstras (two per agent). At 1024² this is the
+	// difference between a sub-second construction and ~10 seconds.
+	costFromGoal := w.computeCostFromGoal()
 	for i, a := range w.Agents {
-		w.initAgentEntrance(a, entries[i])
+		w.initAgentEntrance(a, entries[i], costFromGoal)
 	}
 
-	w.Stats.OptimalDistance = w.ShortestPathLength(w.Maze.EntrancePos, w.Maze.GoalPos)
+	// w.Stats.OptimalDistance is the canonical entrance→goal step
+	// count. Derive it from the same cost map: trace the path and
+	// use its length to match the prior len(DijkstraPath) semantics.
+	if path := w.tracePathToGoal(w.Maze.EntrancePos, costFromGoal); path != nil {
+		w.Stats.OptimalDistance = len(path)
+	}
 	w.Stats.ShortestPaths = w.CountShortestPaths(w.Maze.EntrancePos, w.Maze.GoalPos, MaxShortestPathsCount)
 	// ShortestPathCells is the union of every agent's individual
 	// entrance→goal path. The TUI 's' overlay highlights this set,
@@ -1046,11 +1056,139 @@ func (w *World) carveEntryConnection(p Pos) bool {
 		x += dx
 		y += dy
 	}
-	// Verify connectivity to the goal.
-	if len(w.DijkstraPath(p, w.Maze.GoalPos, w.Maze.IsWalkable)) == 0 {
+	// Verify connectivity to the goal. A 4-conn reachability BFS is
+	// sufficient here — on a grid-carved maze with 1-cell walls the
+	// 4-conn and 8-conn reachable sets coincide, and BFS over a 1M-
+	// cell board is ~20× cheaper than the weighted Dijkstra it
+	// replaced. Path quality doesn't matter at this site; only the
+	// reach predicate does.
+	if !w.reachableFromTo(p, w.Maze.GoalPos) {
 		return false
 	}
 	return true
+}
+
+// reachableFromTo reports whether `to` is reachable from `from` over
+// the 4-connected walkable graph. Plain BFS — no weights, no heap.
+// Used by carveEntryConnection (connectivity check during agent-entry
+// picking) where path cost/shape is irrelevant.
+func (w *World) reachableFromTo(from, to Pos) bool {
+	if from == to {
+		return true
+	}
+	if !w.Maze.IsWalkable(from) || !w.Maze.IsWalkable(to) {
+		return false
+	}
+	visited := map[Pos]bool{from: true}
+	queue := []Pos{from}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		for _, d := range Cardinals[:CardinalCount] {
+			np := Pos{X: cur.X + d.X, Y: cur.Y + d.Y}
+			if !InBounds(np.X, np.Y) || !w.Maze.IsWalkable(np) {
+				continue
+			}
+			if np == to {
+				return true
+			}
+			if visited[np] {
+				continue
+			}
+			visited[np] = true
+			queue = append(queue, np)
+		}
+	}
+	return false
+}
+
+// computeCostFromGoal runs ONE Dijkstra rooted at w.Maze.GoalPos and
+// returns a per-cell minimum-cost map (10/14-weighted 8-conn with
+// corner-clipping). Unreachable cells stay at -1. Used at world
+// construction so per-agent OptimalDistance / ShortestPath can be
+// derived by O(path) greedy descent on the cost map instead of N
+// independent Dijkstras (one per agent).
+func (w *World) computeCostFromGoal() *[BoardHeight][BoardWidth]int {
+	cost := new([BoardHeight][BoardWidth]int)
+	for y := 0; y < BoardHeight; y++ {
+		for x := 0; x < BoardWidth; x++ {
+			cost[y][x] = -1
+		}
+	}
+	goal := w.Maze.GoalPos
+	cost[goal.Y][goal.X] = 0
+	pq := &dijkstraPQ{{goal, 0}}
+	for pq.Len() > 0 {
+		cur := heap.Pop(pq).(dijkstraItem)
+		if cur.cost > cost[cur.pos.Y][cur.pos.X] {
+			continue
+		}
+		for _, d := range Cardinals {
+			np := Pos{X: cur.pos.X + d.X, Y: cur.pos.Y + d.Y}
+			if !InBounds(np.X, np.Y) || !w.Maze.IsWalkable(np) {
+				continue
+			}
+			if w.Maze.IsCornerClipped(cur.pos, np) {
+				continue
+			}
+			newCost := cur.cost + StepCost(d)
+			if cc := cost[np.Y][np.X]; cc != -1 && newCost >= cc {
+				continue
+			}
+			cost[np.Y][np.X] = newCost
+			heap.Push(pq, dijkstraItem{np, newCost})
+		}
+	}
+	return cost
+}
+
+// tracePathToGoal returns the cells visited stepping from `from` to
+// w.Maze.GoalPos by greedy descent on `cost` — at each step we pick
+// the first walkable neighbor whose cost matches `cost[cur] −
+// StepCost(dir)`. The return excludes `from` and includes the goal
+// as the last entry, matching the contract of DijkstraPath. nil when
+// `from` is unreachable or already on the goal.
+func (w *World) tracePathToGoal(from Pos, cost *[BoardHeight][BoardWidth]int) []Pos {
+	if from == w.Maze.GoalPos {
+		return nil
+	}
+	if cost[from.Y][from.X] < 0 {
+		return nil
+	}
+	path := []Pos{}
+	cur := from
+	for cur != w.Maze.GoalPos {
+		cc := cost[cur.Y][cur.X]
+		found := false
+		var next Pos
+		for _, d := range Cardinals {
+			np := Pos{X: cur.X + d.X, Y: cur.Y + d.Y}
+			if !InBounds(np.X, np.Y) || !w.Maze.IsWalkable(np) {
+				continue
+			}
+			if w.Maze.IsCornerClipped(cur, np) {
+				continue
+			}
+			nc := cost[np.Y][np.X]
+			if nc < 0 {
+				continue
+			}
+			if nc+StepCost(d) == cc {
+				next = np
+				found = true
+				break
+			}
+		}
+		if !found {
+			// `from` was supposed to be reachable but descent stalled
+			// — a real bug in the cost map would land here. Fail
+			// safe by returning nil rather than looping forever.
+			return nil
+		}
+		path = append(path, next)
+		cur = next
+	}
+	return path
 }
 
 // initAgentEntrance attaches a perimeter entry to an agent: stamps
@@ -1058,10 +1196,25 @@ func (w *World) carveEntryConnection(p Pos) bool {
 // ShortestPath to the goal, and populates its per-agent DistFromStart
 // BFS table. Called once per agent at world construction; values
 // stay fixed for the life of the maze.
-func (w *World) initAgentEntrance(a *Agent, entry Pos) {
+//
+// `costFromGoal` is the shared goal-rooted cost map (see
+// computeCostFromGoal). Reusing it across agents replaces the per-
+// agent pair of Dijkstras (one for OptimalDistance, one for the
+// ShortestPath set) with a single O(path) greedy trace — the chief
+// reason NewWorld is tractable on the 1024² board.
+func (w *World) initAgentEntrance(a *Agent, entry Pos, costFromGoal *[BoardHeight][BoardWidth]int) {
 	a.EntrancePos = entry
-	a.ShortestPath = w.ShortestPathSet(entry, w.Maze.GoalPos)
-	a.OptimalDistance = w.ShortestPathLength(entry, w.Maze.GoalPos)
+	path := w.tracePathToGoal(entry, costFromGoal)
+	a.ShortestPath = map[Pos]bool{}
+	if path != nil {
+		a.ShortestPath[entry] = true
+		for _, p := range path {
+			a.ShortestPath[p] = true
+		}
+		a.OptimalDistance = len(path)
+	} else {
+		a.OptimalDistance = 0
+	}
 	// Per-agent DistFromStart BFS (4-connected, matches the existing
 	// World.computeDistFromStart semantics so strategy outward-bias
 	// math stays comparable).
@@ -1182,6 +1335,85 @@ func (w *World) DijkstraPath(from, to Pos, walkable func(Pos) bool) []Pos {
 		}
 	}
 	return nil
+}
+
+// AStarPath returns a min-cost path from `from` to `to` over the
+// 8-connected grid, weighted by StepCost (cardinal=10, diagonal=14)
+// with corner-clipping enforced. Same signature and return contract
+// as DijkstraPath — path excludes `from`, nil when unreachable —
+// so it is a drop-in replacement at any call site where the caller
+// has a cheap admissible heuristic. Used by `strategy.BFSToward`
+// (agent strategy R routing).
+//
+// Heuristic: octile distance, h = 10·max(dx,dy) + 4·min(dx,dy).
+// Admissible and consistent against the 10/14 step costs — A* is
+// guaranteed to return the same optimal cost as DijkstraPath; only
+// the number of cells expanded differs (A* expects fewer, especially
+// as the board grows).
+func (w *World) AStarPath(from, to Pos, walkable func(Pos) bool) []Pos {
+	if from == to {
+		return nil
+	}
+	gScore := map[Pos]int{from: 0}
+	prev := map[Pos]Pos{}
+	pq := &dijkstraPQ{{from, octile(from, to)}}
+	for pq.Len() > 0 {
+		cur := heap.Pop(pq).(dijkstraItem)
+		// Stale entry: a cheaper path to cur.pos has already been
+		// finalized, so this popped f-score is no longer current.
+		if cur.cost > gScore[cur.pos]+octile(cur.pos, to) {
+			continue
+		}
+		if cur.pos == to {
+			path := []Pos{}
+			for p := to; p != from; p = prev[p] {
+				path = append(path, p)
+			}
+			for i, j := 0, len(path)-1; i < j; i, j = i+1, j-1 {
+				path[i], path[j] = path[j], path[i]
+			}
+			return path
+		}
+		curG := gScore[cur.pos]
+		for _, d := range Cardinals {
+			np := Pos{X: cur.pos.X + d.X, Y: cur.pos.Y + d.Y}
+			if !InBounds(np.X, np.Y) || !walkable(np) {
+				continue
+			}
+			if w.Maze.IsCornerClipped(cur.pos, np) {
+				continue
+			}
+			tentative := curG + StepCost(d)
+			if cg, ok := gScore[np]; ok && tentative >= cg {
+				continue
+			}
+			gScore[np] = tentative
+			prev[np] = cur.pos
+			heap.Push(pq, dijkstraItem{np, tentative + octile(np, to)})
+		}
+	}
+	return nil
+}
+
+// octile returns the octile-distance heuristic between two cells in
+// the 10/14-weighted 8-conn grid. dx, dy are absolute coordinate
+// deltas; the cheapest unconstrained path takes min(dx,dy) diagonal
+// steps and |dx−dy| cardinal steps, so the cost is
+// 14·min + 10·(max−min) = 10·max + 4·min. Admissible because the
+// real path can only be longer (walls, hazards, corner-clipping).
+func octile(a, b Pos) int {
+	dx := a.X - b.X
+	if dx < 0 {
+		dx = -dx
+	}
+	dy := a.Y - b.Y
+	if dy < 0 {
+		dy = -dy
+	}
+	if dx > dy {
+		return CardinalStepCost*dx + (DiagonalStepCost-CardinalStepCost)*dy
+	}
+	return CardinalStepCost*dy + (DiagonalStepCost-CardinalStepCost)*dx
 }
 
 // newWumpusStrategy returns a Strategy for a freshly-spawned wumpus
@@ -2030,12 +2262,13 @@ func (w *World) maintainSwarmMembership(a *Agent) {
 					Alive: true,
 				})
 			}
-			// Each clone is its own "started run" — it can die or
-			// reach the goal independently. Bump Started by the
-			// clone count so #Runs counts every entity's start, not
-			// just the leader's (the leader was already counted
-			// in the per-agent bump in RespawnAgents).
-			w.ensureStrategyPerf(SwarmStrategyLetter).Started += SwarmClonesPerLeader
+			// The swarm is a single unified entity for run-counting:
+			// the leader's per-agent Started bump in RespawnAgents
+			// already counts this spawn once. The clones are the
+			// swarm's body, not independent runs, so they add nothing
+			// to #Runs here — this keeps Started consistent with the
+			// outcome columns (TTLExpiry / Following / NoFollow), which
+			// likewise fire once per swarm via the leader.
 		}
 		return
 	}

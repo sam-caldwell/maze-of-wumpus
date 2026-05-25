@@ -35,8 +35,8 @@ const (
 )
 
 const (
-	BoardWidth  = 120
-	BoardHeight = 80
+	BoardWidth  = 1024
+	BoardHeight = 1024
 )
 
 // MinGoalDistanceCells is the minimum Manhattan distance from
