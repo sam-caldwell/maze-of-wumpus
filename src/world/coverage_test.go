@@ -1028,48 +1028,110 @@ func TestPickAgentEntrances_DistinctOnDifferentSeeds(t *testing.T) {
 	}
 }
 
-// TestSwarmCloneSpawn_StartedCountsSwarmAsOne: a swarm is a single
-// unified entity for run-counting. Spawning the clones via
-// maintainSwarmMembership must NOT bump StrategyPerf[S].Started —
-// the swarm's single run is counted by the leader's per-agent bump
-// in RespawnAgents, not once per clone. This keeps #Runs consistent
-// with the outcome columns (which fire once per swarm).
-func TestSwarmCloneSpawn_StartedCountsSwarmAsOne(t *testing.T) {
+// TestSwarmLeaderStartsSolo_NoStartedBump: under lazy spawning,
+// joining a swarm assigns a SwarmGroupID but spawns NO clones — the
+// leader starts solo and forks lazily during movement. maintainSwarm-
+// Membership must not bump StrategyPerf.Started either.
+func TestSwarmLeaderStartsSolo_NoStartedBump(t *testing.T) {
 	w := NewWorld(316)
 	w.ensureStrategyPerf(SwarmStrategyLetter).Started = 0 // reset baseline
 	a := w.AgentByLabel('3')
 	a.CurrentStrategy = SwarmStrategyLetter
 	a.SwarmGroupID = 0
+	a.SwarmClones = nil
 	w.maintainSwarmMembership(a)
-	// Clones still materialize (the swarm has a body)...
-	if len(a.SwarmClones) != SwarmClonesPerLeader {
-		t.Errorf("clones = %d, want %d", len(a.SwarmClones), SwarmClonesPerLeader)
+	if a.SwarmGroupID == 0 {
+		t.Error("swarm leader got no SwarmGroupID")
 	}
-	// ...but they add nothing to the run count.
+	if len(a.SwarmClones) != 0 {
+		t.Errorf("leader should start solo, got %d clones", len(a.SwarmClones))
+	}
 	if got := w.StrategyPerf[SwarmStrategyLetter].Started; got != 0 {
-		t.Errorf("Started bumped by %d, want 0 (swarm counts as one entity)", got)
+		t.Errorf("Started bumped by %d, want 0", got)
 	}
 }
 
-// TestSwarmCloneSpawn_TenClonesPerLeader: when an agent's strategy
-// is S and a fresh swarm group is created, exactly
-// SwarmClonesPerLeader clones materialize at the leader's entrance.
-func TestSwarmCloneSpawn_TenClonesPerLeader(t *testing.T) {
-	w := NewWorld(310)
+// TestSwarmCloneSpawn_QmdpSwarmLetterX: strategy 'X' is also a swarm
+// strategy — an agent on X gets a SwarmGroupID (and, lazily, clones).
+// Joining assigns the group and starts solo.
+func TestSwarmCloneSpawn_QmdpSwarmLetterX(t *testing.T) {
+	w := NewWorld(317)
+	a := w.AgentByLabel('7')
+	a.CurrentStrategy = QmdpSwarmStrategyLetter
+	a.SwarmGroupID = 0
+	a.SwarmClones = nil
+	w.maintainSwarmMembership(a)
+	if a.SwarmGroupID == 0 {
+		t.Error("X agent got no SwarmGroupID")
+	}
+	if len(a.SwarmClones) != 0 {
+		t.Errorf("X leader should start solo, got %d clones", len(a.SwarmClones))
+	}
+}
+
+// TestMaintainSwarmMembership_AllNonRLettersSwarm: every strategy
+// letter except R spawns a swarm (group + clones) under the unified
+// all-but-R swarm model.
+func TestMaintainSwarmMembership_AllNonRLettersSwarm(t *testing.T) {
+	w := NewWorld(319)
+	for _, letter := range []rune{'S', 'T', 'U', 'V', 'W', 'X'} {
+		a := w.AgentByLabel('3')
+		a.SwarmGroupID = 0
+		a.SwarmClones = nil
+		a.CurrentStrategy = letter
+		w.maintainSwarmMembership(a)
+		// Lazy model: joining assigns a group but starts solo (clones
+		// are forked later during movement).
+		if a.SwarmGroupID == 0 {
+			t.Errorf("letter %c: expected a SwarmGroupID (swarm-capable)", letter)
+		}
+		if len(a.SwarmClones) != 0 {
+			t.Errorf("letter %c: should start solo, got %d clones", letter, len(a.SwarmClones))
+		}
+	}
+}
+
+// TestMaintainSwarmMembership_RNeverSwarms: the omniscient benchmark R
+// must never spawn a swarm.
+func TestMaintainSwarmMembership_RNeverSwarms(t *testing.T) {
+	w := NewWorld(320)
 	a := w.AgentByLabel('3')
-	a.CurrentStrategy = SwarmStrategyLetter
+	a.CurrentStrategy = BenchmarkStrategyLetter
+	a.SwarmGroupID = 0
+	a.SwarmClones = nil
+	w.maintainSwarmMembership(a)
+	if a.SwarmGroupID != 0 || len(a.SwarmClones) != 0 {
+		t.Errorf("R must never swarm: group=%d clones=%d", a.SwarmGroupID, len(a.SwarmClones))
+	}
+	if IsSwarmStrategy(BenchmarkStrategyLetter) {
+		t.Error("IsSwarmStrategy(R) must be false")
+	}
+}
+
+// TestSwarmLeaderPromotion_LetterX: killing an X swarm leader with a
+// surviving clone promotes the clone into the leader slot (body swap,
+// no real death) — the same generic promotion path S uses.
+func TestSwarmLeaderPromotion_LetterX(t *testing.T) {
+	w := NewWorld(318)
+	a := SpawnAgentForTest(w, '7')
+	a.CurrentStrategy = QmdpSwarmStrategyLetter
 	a.SwarmGroupID = 0
 	w.maintainSwarmMembership(a)
-	if len(a.SwarmClones) != SwarmClonesPerLeader {
-		t.Errorf("clones = %d, want %d", len(a.SwarmClones), SwarmClonesPerLeader)
+	// Lazy model: leader starts solo. Attach a clone manually to model
+	// a swarm that has already forked one, then verify promotion.
+	clonePos := Pos{X: a.EntrancePos.X, Y: a.EntrancePos.Y}
+	a.SwarmClones = []*SwarmClone{{Pos: clonePos, Alive: true}}
+	deathsBefore := a.Stats.Deaths
+	clonesBefore := len(a.SwarmClones)
+	w.KillAgent(a, "wumpus")
+	if !a.Alive {
+		t.Error("X leader should survive as a promoted clone, not die")
 	}
-	for i, c := range a.SwarmClones {
-		if c == nil || !c.Alive {
-			t.Errorf("clone %d nil or dead", i)
-		}
-		if c.Pos != a.EntrancePos {
-			t.Errorf("clone %d at %v, want leader's entrance %v", i, c.Pos, a.EntrancePos)
-		}
+	if a.Stats.Deaths != deathsBefore {
+		t.Error("promotion should not bump Deaths (body swap, not a journey end)")
+	}
+	if len(a.SwarmClones) != clonesBefore-1 {
+		t.Errorf("clone roster = %d, want %d after promotion", len(a.SwarmClones), clonesBefore-1)
 	}
 }
 
@@ -1080,13 +1142,18 @@ func TestSwarmCloneCleanupOnStrategyLeave(t *testing.T) {
 	a := w.AgentByLabel('3')
 	a.CurrentStrategy = SwarmStrategyLetter
 	w.maintainSwarmMembership(a)
-	if a.SwarmGroupID == 0 || len(a.SwarmClones) == 0 {
+	// Attach a clone manually (lazy model starts solo) so we can verify
+	// it's cleared on leaving the swarm.
+	a.SwarmClones = []*SwarmClone{{Pos: a.EntrancePos, Alive: true}}
+	if a.SwarmGroupID == 0 {
 		t.Fatal("swarm not initialized")
 	}
-	a.CurrentStrategy = 'T' // leave the swarm
+	// R (the omniscient benchmark) is the only non-swarm letter, so
+	// switching to it is the way to "leave the swarm."
+	a.CurrentStrategy = BenchmarkStrategyLetter
 	w.maintainSwarmMembership(a)
 	if a.SwarmGroupID != 0 || len(a.SwarmClones) != 0 {
-		t.Errorf("swarm not cleared after leaving S: groupID=%d, clones=%d",
+		t.Errorf("swarm not cleared after leaving to R: groupID=%d, clones=%d",
 			a.SwarmGroupID, len(a.SwarmClones))
 	}
 }
@@ -1100,9 +1167,9 @@ func TestKillAgent_PromotesCloneToLeader(t *testing.T) {
 	a.CurrentStrategy = SwarmStrategyLetter
 	a.Alive = true
 	w.maintainSwarmMembership(a)
-	// Move a clone somewhere distinctive so we can verify the leader
-	// inherited its position.
-	a.SwarmClones[0].Pos = Pos{X: 50, Y: 50}
+	// Lazy model starts solo; attach a clone at a distinctive cell so we
+	// can verify the leader inherits its position on promotion.
+	a.SwarmClones = []*SwarmClone{{Pos: Pos{X: 50, Y: 50}, Alive: true}}
 	prevDeaths := a.Stats.Deaths
 	prevClones := len(a.SwarmClones)
 	w.KillAgent(a, "wumpus")
@@ -1118,6 +1185,28 @@ func TestKillAgent_PromotesCloneToLeader(t *testing.T) {
 	if len(a.SwarmClones) != prevClones-1 {
 		t.Errorf("clone count after promotion = %d, want %d",
 			len(a.SwarmClones), prevClones-1)
+	}
+}
+
+// TestKillAgent_PromotionAdoptsCloneDistance: on a leader TTL death,
+// the promoted clone's individual Dist becomes the leader's
+// ActualDistance — so the swarm continues on the survivor's budget
+// instead of cascading to death on the dead leader's over-TTL distance.
+func TestKillAgent_PromotionAdoptsCloneDistance(t *testing.T) {
+	w := NewWorld(313)
+	a := w.AgentByLabel('3')
+	a.CurrentStrategy = SwarmStrategyLetter
+	a.Alive = true
+	w.maintainSwarmMembership(a)
+	a.Stats.ActualDistance = 9999 // dead leader is way over TTL
+	a.SwarmClones = []*SwarmClone{{Pos: Pos{X: 60, Y: 60}, Alive: true, Dist: 42}}
+	w.KillAgent(a, "ttl")
+	if !a.Alive {
+		t.Fatal("leader should survive via promotion")
+	}
+	if a.Stats.ActualDistance != 42 {
+		t.Errorf("leader ActualDistance after promotion = %d, want 42 (promoted clone's Dist)",
+			a.Stats.ActualDistance)
 	}
 }
 
@@ -1227,12 +1316,15 @@ func TestCheckGoal_CloneOnGoalCreditsLeader(t *testing.T) {
 	a.CurrentStrategy = SwarmStrategyLetter
 	a.Alive = true
 	w.maintainSwarmMembership(a)
+	// Lazy model starts solo; attach a few clones manually, several
+	// already sitting on the goal cell — the swarm must still score
+	// only once.
+	a.SwarmClones = []*SwarmClone{
+		{Pos: w.Maze.GoalPos, Alive: true},
+		{Pos: w.Maze.GoalPos, Alive: true},
+		{Pos: w.Maze.GoalPos, Alive: true},
+	}
 	prevGoals := a.Stats.GoalsReached
-	// Put MULTIPLE clones on the goal cell — the swarm must still
-	// score only once.
-	a.SwarmClones[0].Pos = w.Maze.GoalPos
-	a.SwarmClones[1].Pos = w.Maze.GoalPos
-	a.SwarmClones[2].Pos = w.Maze.GoalPos
 	w.CheckGoal()
 	if a.Stats.GoalsReached != prevGoals+1 {
 		t.Errorf("clone-on-goal didn't credit leader exactly once: %d → %d, want +1",
@@ -1260,7 +1352,9 @@ func TestCheckGoal_CloneOnGoal_SwarmDissolvesAtRespawn(t *testing.T) {
 	a.CurrentStrategy = SwarmStrategyLetter
 	a.Alive = true
 	w.maintainSwarmMembership(a)
-	a.SwarmClones[0].Pos = w.Maze.GoalPos
+	// Lazy model starts solo; attach a clone on the goal to trigger the
+	// clone-on-goal win.
+	a.SwarmClones = []*SwarmClone{{Pos: w.Maze.GoalPos, Alive: true}}
 	w.CheckGoal()
 	// After CheckGoal: leader is dead-pending-respawn, swarm
 	// state should STILL be present (clones at goal, group ID
@@ -1268,14 +1362,12 @@ func TestCheckGoal_CloneOnGoal_SwarmDissolvesAtRespawn(t *testing.T) {
 	if a.SwarmGroupID == 0 {
 		t.Errorf("SwarmGroupID prematurely cleared in CheckGoal")
 	}
-	// Force the respawn path and verify cleanup.
+	// Force the respawn path and verify cleanup. Under lazy spawning a
+	// fresh swarm starts solo (0 clones) with a (possibly new) group.
 	a.RespawnIn = 0
 	w.RespawnAgents()
-	if a.SwarmClones != nil && len(a.SwarmClones) == 10 && a.SwarmGroupID != 0 {
-		// Fresh swarm allocated — that's the expected outcome.
-		// (If maintainSwarmMembership saw old clones it would have
-		// kept them; this confirms cleanup happened first.)
-		return
+	if len(a.SwarmClones) != 0 {
+		t.Errorf("respawned swarm should start solo, got %d clones", len(a.SwarmClones))
 	}
 }
 
@@ -1359,6 +1451,12 @@ func TestStrategyPerf_StartedIncrementedRegardlessOfOutcome(t *testing.T) {
 		t.Errorf("Started not bumped after first spawn (CurrentStrategy=%c)",
 			a.CurrentStrategy)
 	}
+	// Every non-R letter is now a swarm; a leader with surviving clones
+	// would PROMOTE a clone on "death" (a body swap, not a journey end),
+	// so the strategy-death accounting wouldn't fire. Clear the clones
+	// to model the swarm fully collapsing — then KillAgent takes the
+	// real-death path that records the TTL outcome.
+	a.SwarmClones = nil
 	// Kill via TTL — should NOT clear Started.
 	beforeStarted := c.Started
 	w.KillAgent(a, "ttl")

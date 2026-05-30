@@ -203,6 +203,13 @@ func wwNearestSafeFrontier(w *world.World, a *world.Agent) (world.Pos, bool) {
 	}
 	queue := []world.Pos{a.Pos}
 	visited := map[world.Pos]bool{a.Pos: true}
+	// Swarm dispersion: when this agent has swarm peers (and the goal
+	// isn't perceived yet), collect the nearest handful of safe
+	// frontier cells and head for the one FARTHEST from swarm-mates,
+	// so members fan out. Solo agents keep the original behavior:
+	// return the very first (nearest) safe frontier.
+	disperse := len(a.SwarmPeers) > 0 && !(a.KnownCells != nil && a.KnownCells[w.Maze.GoalPos])
+	var candidates []world.Pos
 	for len(queue) > 0 {
 		cur := queue[0]
 		queue = queue[1:]
@@ -218,11 +225,22 @@ func wwNearestSafeFrontier(w *world.World, a *world.Agent) (world.Pos, bool) {
 				continue
 			}
 			if isPerceptionBoundary(np) {
-				return np, true
+				if !disperse {
+					return np, true
+				}
+				candidates = append(candidates, np)
+				visited[np] = true
+				if len(candidates) >= 8 {
+					return farthestFromPeers(a, candidates), true
+				}
+				continue
 			}
 			visited[np] = true
 			queue = append(queue, np)
 		}
+	}
+	if len(candidates) > 0 {
+		return farthestFromPeers(a, candidates), true
 	}
 	return world.Pos{}, false
 }

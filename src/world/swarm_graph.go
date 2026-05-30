@@ -120,7 +120,7 @@ func (w *World) unionSwarmKnownCells(groupID int) map[Pos]bool {
 		return out
 	}
 	for _, a := range w.Agents {
-		if !a.Alive || a.CurrentStrategy != SwarmStrategyLetter {
+		if !a.Alive || !IsSwarmStrategy(a.CurrentStrategy) {
 			continue
 		}
 		if a.SwarmGroupID != groupID {
@@ -140,7 +140,7 @@ func (w *World) unionSwarmKnownCells(groupID int) map[Pos]bool {
 func (w *World) pruneSwarmGraph(swarmKnown map[Pos]bool, groupID int) map[Pos]bool {
 	var memberPos []Pos
 	for _, peer := range w.Agents {
-		if peer.Alive && peer.CurrentStrategy == SwarmStrategyLetter &&
+		if peer.Alive && IsSwarmStrategy(peer.CurrentStrategy) &&
 			peer.SwarmGroupID == groupID {
 			memberPos = append(memberPos, peer.Pos)
 			for _, c := range peer.SwarmClones {

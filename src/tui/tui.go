@@ -163,6 +163,12 @@ type Model struct {
 	ShowPath bool
 	build    WorldBuilder
 
+	// sim, when non-nil, owns the live world and advances it on a
+	// background goroutine (live app). All world access then goes
+	// through sim's lock. When nil (tests), the Model steps the world
+	// synchronously in Update — deterministic, single-goroutine.
+	sim *SimLoop
+
 	// Terminal dims learned from tea.WindowSizeMsg; zero before the
 	// first resize event (e.g. unit tests that never send one). When
 	// zero, the renderer falls back to showing the whole board.
@@ -173,9 +179,9 @@ type Model struct {
 	offsetX, offsetY int
 }
 
-// NewModel constructs a Model. `builder` is the function that turns a
-// seed into a fully-configured *world.World (with strategies attached);
-// the model uses it on launch and to handle the 'r' reseed key.
+// NewModel constructs a SYNCHRONOUS Model: the world steps inline in
+// Update. Used by tests (deterministic, no goroutine). `builder` turns
+// a seed into a fully-configured *world.World.
 func NewModel(seed int64, builder WorldBuilder) Model {
 	if builder == nil {
 		builder = world.NewWorld
@@ -183,102 +189,162 @@ func NewModel(seed int64, builder WorldBuilder) Model {
 	return Model{World: builder(seed), build: builder}
 }
 
-// Init returns the first tick command.
+// NewAsyncModel constructs a Model backed by a background SimLoop — the
+// live-app mode that decouples simulation from rendering.
+func NewAsyncModel(seed int64, builder WorldBuilder) Model {
+	if builder == nil {
+		builder = world.NewWorld
+	}
+	w := builder(seed)
+	return Model{World: w, build: builder, sim: NewSimLoop(w, builder, tickInterval)}
+}
+
+// Init returns the first repaint command, and (async mode) starts the
+// background simulation goroutine.
 func (m Model) Init() tea.Cmd {
+	if m.sim != nil {
+		m.sim.Start()
+		return tickEvery(renderInterval)
+	}
 	return tickEvery(tickInterval)
 }
 
-// Update handles keyboard / tick messages.
+// Update handles keyboard / tick messages. In async mode all world
+// access is serialized through the SimLoop's lock; in sync mode it's
+// direct (single goroutine).
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.termW = msg.Width
 		m.termH = msg.Height
-		m.clampOffsets()
+		// clampOffsets reads the world (right-pane width), so take the
+		// read lock in async mode.
+		m.withWorldRead(func() { m.clampOffsets() })
 		return m, nil
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "q", "ctrl+c":
+		if s := msg.String(); s == "q" || s == "ctrl+c" {
+			if m.sim != nil {
+				m.sim.Stop()
+			}
 			return m, tea.Quit
-		case "up":
-			m.offsetY--
-			m.clampOffsets()
-		case "down":
-			m.offsetY++
-			m.clampOffsets()
-		case "left":
-			m.offsetX--
-			m.clampOffsets()
-		case "right":
-			m.offsetX++
-			m.clampOffsets()
-		case "shift+up", "pgup":
-			// PgUp/PgDn are the reliable vertical-page keys: many
-			// terminals intercept shift+↑/↓ (line-select / scrollback)
-			// and forward a bare ↑/↓, so shift alone can't be trusted
-			// for vertical paging. shift+↑/↓ stay bound for terminals
-			// that do forward them.
-			_, viewH := m.currentViewSize()
-			m.offsetY -= viewH
-			m.clampOffsets()
-		case "shift+down", "pgdown":
-			_, viewH := m.currentViewSize()
-			m.offsetY += viewH
-			m.clampOffsets()
-		case "shift+left":
-			viewW, _ := m.currentViewSize()
-			m.offsetX -= viewW
-			m.clampOffsets()
-		case "shift+right":
-			viewW, _ := m.currentViewSize()
-			m.offsetX += viewW
-			m.clampOffsets()
-		case "r":
-			m.reseedPreservingLearning()
-		case "s":
-			m.ShowPath = !m.ShowPath
-		case "w":
-			// SetWumpusDisabled both flips the flag and spawns
-			// (enable edge) or clears (disable edge) the wumpus
-			// population in one shot — the toggle is symmetric.
-			m.World.SetWumpusDisabled(!m.World.WumpusDisabled)
-		case "f":
-			// 'f' toggles BOTH pit types together to the same state.
-			next := !m.World.FirePitsDisabled
-			m.World.SetFirePitsDisabled(next)
-			m.World.SetWaterPitsDisabled(next)
-		case "t":
-			m.World.TTLDisabled = !m.World.TTLDisabled
-		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
-			// Toggle the matching agent on/off. The agent at label
-			// equal to the typed digit is the target.
-			if a := m.World.AgentByLabel(rune(msg.String()[0])); a != nil {
-				a.Disabled = !a.Disabled
-			}
-		case "a", "A", "b", "B", "c", "C":
-			// Far-sight agents labeled 'A', 'B', 'C' — accept either
-			// the lowercase or uppercase form of the key.
-			label := rune(msg.String()[0])
-			if label >= 'a' && label <= 'z' {
-				label = label - 'a' + 'A'
-			}
-			if a := m.World.AgentByLabel(label); a != nil {
-				a.Disabled = !a.Disabled
-			}
 		}
+		// keySwitch both reads (scroll sizing) and mutates (toggles /
+		// reseed) the world, so run it under the write lock in async
+		// mode; the lock also adopts a UI-driven reseed's new world.
+		m.withWorldWrite(func() { m.keySwitch(msg.String()) })
+		return m, nil
 	case tickMsg:
-		m.World.Step()
-		// Auto-reseed when the maze is "solved": write a stats log
-		// snapshot of the just-finished run, then build a fresh
-		// world preserving each agent's learning state. New mazes
-		// start with all agents enabled (NewWorldWithConfig default).
-		if m.World.MazeSolved() {
-			_, _ = m.World.WriteStatsLog(StatsDir)
-			m.reseedPreservingLearning()
+		if m.sim == nil {
+			// Synchronous (test) mode: step inline, auto-reseed on solve.
+			m.World.Step()
+			if m.World.MazeSolved() {
+				_, _ = m.World.WriteStatsLog(StatsDir)
+				m.reseedPreservingLearning()
+			}
+			return m, tickEvery(tickInterval)
 		}
-		return m, tickEvery(tickInterval)
+		// Async mode: the SimLoop goroutine advances the world; this
+		// tick only re-arms the repaint.
+		return m, tickEvery(renderInterval)
 	}
 	return m, nil
+}
+
+// withWorldRead runs fn with m.World pointed at the live world under a
+// read lock (async), or directly (sync). For read-only world access
+// that may mutate Model UI state (offsets).
+func (m *Model) withWorldRead(fn func()) {
+	if m.sim == nil {
+		fn()
+		return
+	}
+	m.sim.mu.RLock()
+	defer m.sim.mu.RUnlock()
+	m.World = m.sim.world
+	fn()
+}
+
+// withWorldWrite runs fn under the write lock with m.World pointed at
+// the live world, then publishes m.World back to the loop so a reseed
+// performed inside fn swaps the live world atomically.
+func (m *Model) withWorldWrite(fn func()) {
+	if m.sim == nil {
+		fn()
+		return
+	}
+	m.sim.mu.Lock()
+	defer m.sim.mu.Unlock()
+	m.World = m.sim.world
+	fn()
+	m.sim.world = m.World
+}
+
+// keySwitch applies a non-quit keypress: viewport scrolling, overlay /
+// hazard / agent toggles, and reseed. Mutates m (offsets, ShowPath)
+// and m.World; callers handle any locking.
+func (m *Model) keySwitch(s string) {
+	switch s {
+	case "up":
+		m.offsetY--
+		m.clampOffsets()
+	case "down":
+		m.offsetY++
+		m.clampOffsets()
+	case "left":
+		m.offsetX--
+		m.clampOffsets()
+	case "right":
+		m.offsetX++
+		m.clampOffsets()
+	case "shift+up", "pgup":
+		// PgUp/PgDn are the reliable vertical-page keys: many terminals
+		// intercept shift+↑/↓ (line-select / scrollback) and forward a
+		// bare ↑/↓, so shift alone can't be trusted for vertical paging.
+		// shift+↑/↓ stay bound for terminals that do forward them.
+		_, viewH := m.currentViewSize()
+		m.offsetY -= viewH
+		m.clampOffsets()
+	case "shift+down", "pgdown":
+		_, viewH := m.currentViewSize()
+		m.offsetY += viewH
+		m.clampOffsets()
+	case "shift+left":
+		viewW, _ := m.currentViewSize()
+		m.offsetX -= viewW
+		m.clampOffsets()
+	case "shift+right":
+		viewW, _ := m.currentViewSize()
+		m.offsetX += viewW
+		m.clampOffsets()
+	case "r":
+		m.reseedPreservingLearning()
+	case "s":
+		m.ShowPath = !m.ShowPath
+	case "w":
+		// SetWumpusDisabled both flips the flag and spawns (enable edge)
+		// or clears (disable edge) the wumpus population in one shot.
+		m.World.SetWumpusDisabled(!m.World.WumpusDisabled)
+	case "f":
+		// 'f' toggles BOTH pit types together to the same state.
+		next := !m.World.FirePitsDisabled
+		m.World.SetFirePitsDisabled(next)
+		m.World.SetWaterPitsDisabled(next)
+	case "t":
+		m.World.TTLDisabled = !m.World.TTLDisabled
+	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+		if a := m.World.AgentByLabel(rune(s[0])); a != nil {
+			a.Disabled = !a.Disabled
+		}
+	case "a", "A", "b", "B", "c", "C":
+		// Far-sight agents 'A'/'B'/'C' — accept either case.
+		label := rune(s[0])
+		if label >= 'a' && label <= 'z' {
+			label = label - 'a' + 'A'
+		}
+		if a := m.World.AgentByLabel(label); a != nil {
+			a.Disabled = !a.Disabled
+		}
+	}
 }
 
 // StatsDir is the directory under which maze-solved JSON snapshots
@@ -299,14 +365,23 @@ const StatsDir = "build/stats"
 //
 // Used by the 'r' key AND the auto-reseed-on-solve path.
 func (m *Model) reseedPreservingLearning() {
-	prev := m.World.Agents
-	m.World = m.build(time.Now().UnixNano())
+	m.World = reseedWorldPreservingLearning(m.World, m.build)
 	m.offsetX, m.offsetY = 0, 0
-	for i, oldA := range prev {
-		if i >= len(m.World.Agents) {
+}
+
+// reseedWorldPreservingLearning builds a fresh world and grafts each
+// agent's persistent learning state (Beliefs / DQN / TrustScores /
+// LearnedTTL) from `prev` onto the new agents. Shared by the Model's
+// reseed path and the SimLoop's auto-reseed-on-solve so both keep
+// learning across maps identically.
+func reseedWorldPreservingLearning(prev *world.World, build WorldBuilder) *world.World {
+	prevAgents := prev.Agents
+	nw := build(time.Now().UnixNano())
+	for i, oldA := range prevAgents {
+		if i >= len(nw.Agents) {
 			break
 		}
-		newA := m.World.Agents[i]
+		newA := nw.Agents[i]
 		if oldA.Beliefs != nil {
 			newA.Beliefs = oldA.Beliefs
 		}
@@ -322,6 +397,7 @@ func (m *Model) reseedPreservingLearning() {
 		// MoveAgents drops it if the new map's TTL is larger.
 		newA.LearnedTTL = oldA.LearnedTTL
 	}
+	return nw
 }
 
 // View composes the four panes — header, maze (scrollable), right
@@ -329,6 +405,24 @@ func (m *Model) reseedPreservingLearning() {
 // into a single frame. Only the maze pane scrolls; the others are
 // pure projections of world state.
 func (m Model) View() string {
+	// Async mode: stat panes come from the decoupled aggregator (no
+	// world access on the render path); only the maze viewport reads
+	// the live world, briefly, under the read lock.
+	if m.sim != nil {
+		if frame := m.sim.stats.Latest(); frame != nil {
+			m.sim.mu.RLock()
+			m.World = m.sim.world
+			mazeW, mazeH := m.mazeViewSize(paneWidth(frame.right()))
+			maze := m.renderMazePane(mazeW, mazeH)
+			m.sim.mu.RUnlock()
+			body := lipgloss.JoinHorizontal(lipgloss.Top, maze, "  ", frame.right())
+			return lipgloss.JoinVertical(lipgloss.Left, frame.header, body, frame.bottom)
+		}
+		// Before the first published frame: render everything live.
+		m.sim.mu.RLock()
+		defer m.sim.mu.RUnlock()
+		m.World = m.sim.world
+	}
 	right := m.renderRightPane()
 	rightW := paneWidth(right)
 	mazeW, mazeH := m.mazeViewSize(rightW)

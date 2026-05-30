@@ -37,6 +37,10 @@ import (
 // branch-anim tests, but it's no longer part of the per-journey
 // strategy pool.
 const (
+	// StrategyBFS ('R') is the omniscient benchmark. The name is
+	// historical — it now routes via A* (BFSToward → World.AStarPath),
+	// and it's the lone non-swarm strategy (a singleton, per
+	// world.IsSwarmStrategy).
 	StrategyBFS = 'R'
 	// StrategySwarmBayesian aliases world.SwarmStrategyLetter so
 	// the world package can detect swarm members for path-sharing
@@ -66,21 +70,18 @@ var StrategyLetters = []rune{
 // nil if the letter is unrecognised. This is the runtime dispatch
 // used when an agent's CurrentStrategy drives action selection.
 func ForLetter(letter rune) world.Strategy {
+	// R (omniscient benchmark) is the only non-swarm letter. Every
+	// other letter runs the universal branch-spreading swarm wrapper,
+	// which dispatches to the letter's own solo planner for
+	// exploitation (see SwarmStrategy / soloPlannerFor). The solo
+	// planner functions themselves are still used directly by
+	// ForLabel for the fixed agent-identity mappings.
 	switch letter {
 	case StrategyBFS:
 		return BFSStrategy
-	case StrategySwarmBayesian:
-		return SwarmBayesianStrategy
-	case StrategyBayesian:
-		return BayesianStrategy
-	case StrategyScentFollower:
-		return ScentFollowerStrategy
-	case StrategyDQN:
-		return DQNStrategy
-	case StrategyPOMCP:
-		return POMCPStrategy
-	case StrategyQMDP:
-		return QMDPStrategy
+	case StrategySwarmBayesian, StrategyBayesian, StrategyScentFollower,
+		StrategyDQN, StrategyPOMCP, StrategyQMDP:
+		return SwarmStrategy
 	}
 	return nil
 }
@@ -91,19 +92,19 @@ func ForLetter(letter rune) world.Strategy {
 func DescriptionByLetter(letter rune) string {
 	switch letter {
 	case StrategyBFS:
-		return "Omniscient breadth-first search to goal"
+		return "Omniscient A* shortest-path benchmark (singleton)"
 	case StrategySwarmBayesian:
-		return "Bayesian PO with shared (swarm) KnownCells + Beliefs"
+		return "Bayesian swarm: shared beliefs, forks & disperses"
 	case StrategyBayesian:
-		return "Inductive Bayesian reasoning, partial observability"
+		return "Bayesian swarm (strict-PO inductive reasoning)"
 	case StrategyScentFollower:
-		return "Bayesian + scent: follow a chosen leader's trail"
+		return "Scent-follower swarm: shares a leader's trail"
 	case StrategyDQN:
-		return "Deep Q-network with scent perception"
+		return "DQN swarm: deep Q-network clones explore"
 	case StrategyPOMCP:
-		return "Flat Monte-Carlo planner (POMCP-lite) with scent"
+		return "POMCP swarm: Monte-Carlo lookahead clones"
 	case StrategyQMDP:
-		return "POMDP QMDP-style expected-utility planner with scent"
+		return "QMDP swarm: expected-utility clones explore"
 	}
 	return "unknown"
 }
@@ -113,19 +114,19 @@ func DescriptionByLetter(letter rune) string {
 func NameByLetter(letter rune) string {
 	switch letter {
 	case StrategyBFS:
-		return "bfs"
+		return "astar"
 	case StrategySwarmBayesian:
 		return "swarm-bayesian"
 	case StrategyBayesian:
-		return "bayesian"
+		return "bayesian-swarm"
 	case StrategyScentFollower:
-		return "scent-follower"
+		return "scent-swarm"
 	case StrategyDQN:
-		return "dqn"
+		return "dqn-swarm"
 	case StrategyPOMCP:
-		return "pomcp"
+		return "pomcp-swarm"
 	case StrategyQMDP:
-		return "qmdp"
+		return "qmdp-swarm"
 	}
 	return "unknown"
 }

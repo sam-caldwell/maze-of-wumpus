@@ -91,6 +91,9 @@ func qmdpStrategyPlan(w *world.World, a *world.Agent) world.Pos {
 		}
 		scent := w.ScentSignedFreshness(a, np.X, np.Y)
 		score := safety * (qmdpExploreWeight*explore + qmdpScentWeight*scent)
+		// Swarm dispersion: repel from nearby swarm-mates while
+		// exploring (no-op solo / once goal perceived).
+		score -= qmdpRepelWeight * swarmDispersionPenalty(w, a, np)
 		if score > bestVal {
 			bestVal = score
 			best = np

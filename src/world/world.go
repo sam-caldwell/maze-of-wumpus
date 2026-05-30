@@ -11,6 +11,7 @@ package world
 
 import (
 	"container/heap"
+	"fmt"
 	"math"
 	"math/rand"
 )
@@ -400,6 +401,14 @@ type Agent struct {
 	// dissolves.
 	SwarmClones []*SwarmClone
 
+	// SwarmPeers holds the positions of the OTHER alive members of this
+	// agent's swarm during a swarm planning tick (set by the swarm
+	// wrapper before each member's planner runs). The per-algorithm
+	// dispersion term reads it so members are repelled from one another
+	// while exploring. nil for solo agents / non-swarm ticks, making
+	// dispersion a no-op there.
+	SwarmPeers []Pos
+
 	// prunedKnownSize is len(KnownCells) at the last prune-recompute.
 	// KnownCells is monotonic within a map life so a size delta is
 	// a sufficient dirty signal.
@@ -529,6 +538,19 @@ type SwarmClone struct {
 	Plan              []Pos
 	KnownShortestPath []Pos
 	Alive             bool
+
+	// Dist is the number of cells THIS clone has travelled this life.
+	// Each clone is judged against TTL on its own Dist (not the
+	// swarm's aggregate), so a clone expires only after it personally
+	// travels TTLMultiplier × ttlBudget cells. On promotion the leader
+	// adopts the promoted clone's Dist.
+	Dist int
+
+	// Trail is a small ring of the clone's most-recent positions, used
+	// to detect thrashing (oscillating over a few cells). When a clone
+	// is found thrashing it is terminated (Alive=false) and respawned
+	// from the leader next tick.
+	Trail []Pos
 }
 
 // SwarmStrategyLetter is the strategy letter whose agents share
@@ -537,6 +559,22 @@ type SwarmClone struct {
 // package can detect swarm members without importing strategy/.
 // The strategy package re-exports this as StrategySwarmBayesian.
 const SwarmStrategyLetter rune = 'S'
+
+// QmdpSwarmStrategyLetter is retained as a named handle for the QMDP
+// swarm ('X'). Every non-benchmark strategy is now a swarm (see
+// IsSwarmStrategy), so this is no longer a special case — it's kept
+// for the rare call site that wants to name the QMDP letter directly.
+const QmdpSwarmStrategyLetter rune = 'X'
+
+// IsSwarmStrategy reports whether a strategy letter spawns a
+// knowledge-sharing, branch-spreading clone swarm. EVERY real
+// strategy letter does EXCEPT the omniscient benchmark R, which is a
+// singleton that must never swarm. 0 (unset) is not a swarm.
+// Centralizes the swarm-membership predicate so clone spawn,
+// knowledge union, graph pruning, and leader promotion all agree.
+func IsSwarmStrategy(letter rune) bool {
+	return letter != 0 && letter != BenchmarkStrategyLetter
+}
 
 // SwarmMinQuorum is the smallest viable size for the S swarm. If
 // fewer than this many agents are alive on S after RespawnAgents
@@ -663,6 +701,13 @@ type World struct {
 	// (deaths / goal reaches). Appended in order; the TUI shows
 	// the last EventsVisible entries. Capped at EventBufferSize.
 	Events []Event
+
+	// DecisionLog is the rolling per-tick trace of agent/clone
+	// navigation decisions, surfaced by the TUI's toggleable decision
+	// viewport ('l'). Only populated while DecisionLogEnabled is set
+	// (the UI flips it on demand) so it costs nothing when not viewed.
+	DecisionLog        []string
+	DecisionLogEnabled bool
 
 	// StrategyPerf accumulates per-strategy run-end counts since
 	// the last reseed. Indexed by strategy letter. Surfaced by
@@ -1752,6 +1797,14 @@ func (w *World) MoveAgents() {
 		w.AgentAt[target.Y][target.X] = a
 		w.MarkAgentSensed(a)
 		a.Stats.ActualDistance++
+		if w.DecisionLogEnabled {
+			st := a.CurrentStrategy
+			if st == 0 {
+				st = '?'
+			}
+			w.LogDecision(fmt.Sprintf("t%d %c/%c (%d,%d)->(%d,%d) d%d",
+				w.Cycle, a.Label, st, oldPos.X, oldPos.Y, a.Pos.X, a.Pos.Y, a.Stats.ActualDistance))
+		}
 		// Path-alignment bookkeeping: ShortestPathCells holds one
 		// chosen shortest entrance→goal route; landing on it counts
 		// toward OnPathSteps, anywhere else is OffPathSteps.
@@ -1842,11 +1895,11 @@ func (w *World) MoveAgents() {
 			a.LearnedTTL = 0
 		}
 	}
-	// Note: swarm clone movement is driven from inside
-	// SwarmBayesianStrategy (strategy package) so every clone uses
-	// the real Bayesian planning core — not a stripped-down outward-
-	// bias step. That way each clone is its own goal-seeker against
-	// the shared (pruned) KnownCells.
+	// Note: swarm clone movement is driven from inside the swarm
+	// strategy wrapper (strategy.SwarmStrategy) when the leader is
+	// planned above. Each clone takes its own branch-steered step
+	// against the shared KnownCells, so the swarm fans across the
+	// frontier rather than trailing the leader.
 }
 
 // CanMoveTo reports whether agent `a` could legally move to `target`
@@ -2237,39 +2290,30 @@ func (w *World) RespawnAgents() {
 // reflect the agent's current strategy. Called after every spawn /
 // enforcement pass.
 //
-//   - If a.CurrentStrategy == SwarmStrategyLetter and a.SwarmGroupID
-//     is 0, allocate a fresh swarm ID (independent of any existing
-//     swarm) and spawn SwarmClonesPerLeader clones at the agent's
-//     EntrancePos.
+//   - If a.CurrentStrategy is a swarm letter and a.SwarmGroupID is 0,
+//     allocate a fresh swarm ID. The leader starts SOLO — clones are
+//     NOT pre-spawned; each algorithm forks them lazily at decision
+//     points during movement (see strategy.SwarmStrategy), capped at
+//     SwarmClonesPerLeader alive clones.
 //   - If a.CurrentStrategy is anything else and a.SwarmGroupID is
 //     non-zero, the agent has left the swarm — clear membership and
 //     drop clones.
 //
-// Existing S-members keep their SwarmGroupID across respawns so
-// that group cohesion persists through individual deaths (the
-// promotion-on-leader-death path).
+// Swarm members keep their SwarmGroupID across respawns so that group
+// cohesion persists through individual deaths (the promotion-on-
+// leader-death path).
+//
+// Run-counting note: the leader's per-agent Started bump in
+// RespawnAgents counts the whole swarm once; lazily-forked clones are
+// the swarm's body, not independent runs, so forking never touches
+// #Runs (keeps Started consistent with the outcome columns).
 func (w *World) maintainSwarmMembership(a *Agent) {
-	if a.CurrentStrategy == SwarmStrategyLetter {
+	if IsSwarmStrategy(a.CurrentStrategy) {
 		if a.SwarmGroupID == 0 {
 			w.nextSwarmGroupID++
 			a.SwarmGroupID = w.nextSwarmGroupID
 		}
-		if a.SwarmClones == nil {
-			a.SwarmClones = make([]*SwarmClone, 0, SwarmClonesPerLeader)
-			for i := 0; i < SwarmClonesPerLeader; i++ {
-				a.SwarmClones = append(a.SwarmClones, &SwarmClone{
-					Pos:   a.EntrancePos,
-					Alive: true,
-				})
-			}
-			// The swarm is a single unified entity for run-counting:
-			// the leader's per-agent Started bump in RespawnAgents
-			// already counts this spawn once. The clones are the
-			// swarm's body, not independent runs, so they add nothing
-			// to #Runs here — this keeps Started consistent with the
-			// outcome columns (TTLExpiry / Following / NoFollow), which
-			// likewise fire once per swarm via the leader.
-		}
+		// Leader starts solo: no clones until the algorithm forks them.
 		return
 	}
 	// Left the swarm.
@@ -2533,7 +2577,16 @@ func (w *World) KillAgent(a *Agent, reason ...string) {
 			a.Pos = c.Pos
 			a.Plan = c.Plan
 			a.KnownShortestPath = c.KnownShortestPath
+			// Adopt the promoted clone's individual travel distance so
+			// the leader's TTL reflects the SURVIVING entity's budget —
+			// otherwise the new leader inherits the dead leader's over-
+			// TTL ActualDistance and the whole swarm cascades to death.
+			a.Stats.ActualDistance = c.Dist
 			w.AgentAt[a.Pos.Y][a.Pos.X] = a
+			if w.DecisionLogEnabled {
+				w.LogDecision(fmt.Sprintf("t%d %c promote clone@(%d,%d) d%d",
+					w.Cycle, a.Label, a.Pos.X, a.Pos.Y, c.Dist))
+			}
 			// Shrink the clone slice (remove the promoted one).
 			a.SwarmClones = append(a.SwarmClones[:i], a.SwarmClones[i+1:]...)
 			a.SearchAnim = nil
@@ -3399,12 +3452,14 @@ func (w *World) ensureStrategyPerf(letter rune) *StrategyPerfCounts {
 // broadcasts the resulting path back to every alive swarm peer's
 // KnownShortestPath. One swarm member's win lifts the whole hive.
 func (w *World) optimizeKnownPath(a *Agent) {
-	if a.CurrentStrategy == SwarmStrategyLetter {
+	if IsSwarmStrategy(a.CurrentStrategy) {
 		if a.KnownCells == nil {
 			a.KnownCells = map[Pos]bool{}
 		}
 		for _, peer := range w.Agents {
-			if peer == a || !peer.Alive || peer.CurrentStrategy != SwarmStrategyLetter {
+			// Pool only with same-strategy swarm peers so an S hive and
+			// an X hive don't cross-contaminate paths.
+			if peer == a || !peer.Alive || peer.CurrentStrategy != a.CurrentStrategy {
 				continue
 			}
 			for p := range peer.KnownCells {
@@ -3439,10 +3494,11 @@ func (w *World) optimizeKnownPath(a *Agent) {
 			// into every alive swarm peer so they can replay it
 			// without having to reach the goal themselves first.
 			// Path is cloned so peer mutation (e.g., partial
-			// replay) doesn't bleed back.
-			if a.CurrentStrategy == SwarmStrategyLetter {
+			// replay) doesn't bleed back. Same-strategy gating keeps
+			// S and X hives separate.
+			if IsSwarmStrategy(a.CurrentStrategy) {
 				for _, peer := range w.Agents {
-					if peer == a || !peer.Alive || peer.CurrentStrategy != SwarmStrategyLetter {
+					if peer == a || !peer.Alive || peer.CurrentStrategy != a.CurrentStrategy {
 						continue
 					}
 					peer.KnownShortestPath = append([]Pos(nil), path...)

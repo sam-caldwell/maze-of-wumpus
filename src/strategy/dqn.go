@@ -88,7 +88,20 @@ func dqnStrategyPlan(w *world.World, a *world.Agent) world.Pos {
 		action = w.Rng.Intn(world.DqnOutput)
 	} else {
 		_, out := dnn.Forward(in)
-		action = world.ArgMaxFloat(out)
+		// Swarm dispersion: penalize actions whose target cell sits
+		// near swarm-mates so clones spread out (no-op for solo agents
+		// and once the goal is perceived).
+		best, bestVal := 0, 0.0
+		for i := 0; i < world.DqnOutput && i < len(out); i++ {
+			d := world.Cardinals[i]
+			np := world.Pos{X: a.Pos.X + d.X, Y: a.Pos.Y + d.Y}
+			v := out[i] - dqnRepelWeight*swarmDispersionPenalty(w, a, np)
+			if i == 0 || v > bestVal {
+				bestVal = v
+				best = i
+			}
+		}
+		action = best
 	}
 
 	// Water override: out-of-water + pits-exist → step toward nearest

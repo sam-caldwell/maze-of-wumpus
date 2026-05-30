@@ -100,14 +100,15 @@ func TestQMDPStrategy_NoKnownNeighborsFallsBack(t *testing.T) {
 	}
 }
 
-// TestSwarmBayesianStrategy_BasicCall: with a minimal swarm setup,
-// SwarmBayesianStrategy returns a move (or a.Pos for stay) and does
-// not panic. Wires up: agent on swarm strategy, valid KnownCells,
+// TestSwarmStrategy_BasicCall: with a minimal swarm setup, the
+// universal SwarmStrategy returns a move (or a.Pos for stay) and does
+// not panic. Wires up: agent on a swarm letter, valid KnownCells,
 // Beliefs initialized.
-func TestSwarmBayesianStrategy_BasicCall(t *testing.T) {
+func TestSwarmStrategy_BasicCall(t *testing.T) {
 	w := newConfiguredWorld(202)
 	a := world.SpawnAgentForTest(w, '3')
 	a.CurrentStrategy = StrategySwarmBayesian
+	a.SwarmGroupID = 1
 	a.Beliefs = world.NewAgentBeliefs()
 	a.KnownCells = map[world.Pos]bool{a.Pos: true}
 	for _, d := range world.Cardinals[:world.CardinalCount] {
@@ -116,32 +117,28 @@ func TestSwarmBayesianStrategy_BasicCall(t *testing.T) {
 			a.KnownCells[np] = true
 		}
 	}
-	got := SwarmBayesianStrategy(w, a)
+	got := SwarmStrategy(w, a)
 	dx := got.X - a.Pos.X
 	dy := got.Y - a.Pos.Y
 	if got != a.Pos && (dx < -1 || dx > 1 || dy < -1 || dy > 1) {
-		t.Errorf("SwarmBayesianStrategy returned non-neighbor %v from %v", got, a.Pos)
+		t.Errorf("SwarmStrategy returned non-neighbor %v from %v", got, a.Pos)
 	}
 }
 
-// TestSwarmBayesianStrategy_StrictPO: SwarmBayesianStrategy must
-// NEVER consult w.Maze.GoalPos when GoalPos isn't in the agent's
-// KnownCells. We assert this by routing the agent on a world where
-// only the agent's own cell + non-goal neighbors are known.
-func TestSwarmBayesianStrategy_StrictPO(t *testing.T) {
+// TestSwarmStrategy_StrictPO: the swarm wrapper must NEVER consult
+// w.Maze.GoalPos when GoalPos isn't in the agent's KnownCells.
+func TestSwarmStrategy_StrictPO(t *testing.T) {
 	w := newConfiguredWorld(203)
 	a := world.SpawnAgentForTest(w, '3')
 	a.CurrentStrategy = StrategySwarmBayesian
+	a.SwarmGroupID = 1
 	a.Beliefs = world.NewAgentBeliefs()
 	a.KnownCells = map[world.Pos]bool{a.Pos: true}
 	// Do NOT include w.Maze.GoalPos in KnownCells.
 	if a.KnownCells[w.Maze.GoalPos] {
 		t.Fatal("test setup error: GoalPos should not be perceived")
 	}
-	got := SwarmBayesianStrategy(w, a)
-	// The agent might "stay" or move to an unknown neighbor (which
-	// the strategy returns as a.Pos). What it must NOT do is jump
-	// to GoalPos, since that's not perceived.
+	got := SwarmStrategy(w, a)
 	if got == w.Maze.GoalPos && got != a.Pos {
 		t.Errorf("strict PO violation: agent moved to GoalPos %v without perceiving it", got)
 	}

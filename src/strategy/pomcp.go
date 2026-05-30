@@ -109,6 +109,9 @@ func pomcpStrategyPlan(w *world.World, a *world.Agent) world.Pos {
 	best := a.Pos
 	bestMean := math.Inf(-1)
 	for i, m := range means {
+		// Swarm dispersion: penalize candidates near swarm-mates so
+		// clones spread (no-op solo / once goal perceived).
+		m -= pomcpRepelWeight * swarmDispersionPenalty(w, a, candidates[i])
 		if m > bestMean {
 			bestMean = m
 			best = candidates[i]

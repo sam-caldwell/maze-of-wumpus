@@ -59,7 +59,9 @@ var teaRunner = func(m tui.Model) error {
 // tests. Tests swap in a stub.
 var runProgram = func(seed int64) error {
 	ensureLogDirs()
-	m := tui.NewModel(seed, buildWorld)
+	// Async model: simulation runs on its own goroutine, decoupled
+	// from rendering, so a slow Step() never freezes input/repaint.
+	m := tui.NewAsyncModel(seed, buildWorld)
 	// On macOS, kick off a non-blocking 'say' announcement that
 	// overlaps with the first TUI render. No-op on every other OS.
 	announce()

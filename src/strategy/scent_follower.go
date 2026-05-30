@@ -103,7 +103,8 @@ func scentFollowerStrategyPlan(w *world.World, a *world.Agent) world.Pos {
 		if pick != 0 && owner == pick {
 			weight = scentFollowerTrusteeBonus
 		}
-		if v := safety * freshness * weight; v > bestVal {
+		v := safety*freshness*weight - scentRepelWeight*swarmDispersionPenalty(w, a, np)
+		if v > bestVal {
 			bestVal = v
 			best = np
 			bestOwner = owner
