@@ -1,11 +1,13 @@
-// bayesian.go — agent A: a faithful Wumpus-World agent. Inductive
-// + Bayesian reasoning over heat / stench observations at visited
-// cells. Three-stage decision pipeline:
+// bayesian.go — agent A: a strict partially-observable navigator.
+// With hazards removed, every perceived walkable cell is enterable;
+// the agent still respects partial observability — it only routes
+// through cells it has perceived (a.KnownCells) and only heads for
+// the goal once it has actually sensed the goal cell. Two-stage
+// decision pipeline:
 //
-//  1. STRICT: plan a BFS to goal through cells proven safe by KB.
-//  2. FRONTIER: walk to the nearest safe-but-unvisited cell to gather
-//     more observations.
-//  3. RISK: relax to "not provably hazardous" and re-plan to goal.
+//  1. GOAL: once the goal is perceived, plan a path to it.
+//  2. FRONTIER: otherwise walk to the nearest perception-boundary
+//     cell to expand the perceived map.
 package strategy
 
 import (
@@ -62,45 +64,17 @@ func bayesianStrategyPlan(w *world.World, a *world.Agent) world.Pos {
 	return next
 }
 
-// wwCellOK reports whether `p` is strictly safe to enter under the
-// agent's KB. Safe iff perceived (in `a.KnownCells`), walkable, no
-// known pit, no current stench, AND either visited OR inductively
-// proven pit-free.
+// wwCellOK reports whether `p` is enterable under the agent's KB.
+// With hazards removed, a perceived walkable cell is always OK.
 func wwCellOK(w *world.World, a *world.Agent, p world.Pos) bool {
-	if !knownWalkable(w, a, p) {
-		return false
-	}
-	if a.Beliefs == nil {
-		return false
-	}
-	if a.Beliefs.PitProb[p] >= 0.5 {
-		return false
-	}
-	if a.Beliefs.WumpusProb[p] > 0 {
-		return false
-	}
-	if a.Beliefs.Observed[p] {
-		return true
-	}
-	return a.Beliefs.SafeFromPit[p]
+	return knownWalkable(w, a, p)
 }
 
-// wwCellOKLoose: relaxed "calculated risk" predicate. Still gated on
-// `a.KnownCells` — the agent never routes through unseen cells.
+// wwCellOKLoose: same predicate as wwCellOK now that hazards are gone.
+// Still gated on `a.KnownCells` — the agent never routes through
+// unseen cells.
 func wwCellOKLoose(w *world.World, a *world.Agent, p world.Pos) bool {
-	if !knownWalkable(w, a, p) {
-		return false
-	}
-	if a.Beliefs == nil {
-		return true
-	}
-	if a.Beliefs.PitProb[p] >= 1.0 {
-		return false
-	}
-	if a.Beliefs.WumpusProb[p] > 0 {
-		return false
-	}
-	return true
+	return knownWalkable(w, a, p)
 }
 
 // wwPlanPath runs the strict-PO decision pipeline. Crucially the
@@ -108,23 +82,11 @@ func wwCellOKLoose(w *world.World, a *world.Agent, p world.Pos) bool {
 // cell (added to KnownCells via MarkAgentSensed). Before then it
 // expands purely via frontier exploration.
 //
-//  0. WATER (if NeedsWater): try a strict-safe BFS to the nearest
-//     water pit. Water is "free life insurance" — grab it whenever
-//     a proven-safe path exists.
 //  1. GOAL (only if KnownCells already contains the goal cell —
 //     i.e. some agent past life sensed it OR this life perceived
-//     it via the sensing radius): strict-safe BFS to goal.
-//  2. FRONTIER: walk to the nearest safe-but-unvisited cell.
-//  3. RISK FALLBACK: if goal is perceived, try a relaxed path to
-//     it. Otherwise loose-predicate frontier expansion.
+//     it via the sensing radius): BFS to goal.
+//  2. FRONTIER: walk to the nearest perceived-but-boundary cell.
 func wwPlanPath(w *world.World, a *world.Agent) []world.Pos {
-	if NeedsKnownWater(w, a) {
-		if pit, ok := NearestKnownWaterPit(w, a, a.Pos); ok {
-			if p := wwBFS(w, a, a.Pos, pit, true); len(p) > 0 {
-				return p
-			}
-		}
-	}
 	goalPerceived := a.KnownCells != nil && a.KnownCells[w.Maze.GoalPos]
 	if goalPerceived {
 		if p := wwBFS(w, a, a.Pos, w.Maze.GoalPos, true); len(p) > 0 {
@@ -245,8 +207,10 @@ func wwNearestSafeFrontier(w *world.World, a *world.Agent) (world.Pos, bool) {
 	return world.Pos{}, false
 }
 
-// UpdateAgentBeliefs runs inductive + Bayesian updates from heat /
-// stench at the agent's current cell.
+// UpdateAgentBeliefs marks the agent's current cell (and its
+// perceived Moore neighbors) as Observed. With hazards removed there
+// is no longer any pit/wumpus inference to perform; the Observed
+// bookkeeping is retained so callers that gate on it still behave.
 func UpdateAgentBeliefs(w *world.World, a *world.Agent) {
 	if a.Beliefs == nil {
 		return
@@ -254,72 +218,16 @@ func UpdateAgentBeliefs(w *world.World, a *world.Agent) {
 	b := a.Beliefs
 	p := a.Pos
 	b.Observed[p] = true
-	b.SafeFromPit[p] = true
-	delete(b.PitProb, p)
-	delete(b.WumpusProb, p)
-
-	if !w.HeatAt(p.X, p.Y) {
-		for dy := -1; dy <= 1; dy++ {
-			for dx := -1; dx <= 1; dx++ {
-				if dx == 0 && dy == 0 {
-					continue
-				}
-				np := world.Pos{X: p.X + dx, Y: p.Y + dy}
-				if !world.InBounds(np.X, np.Y) {
-					continue
-				}
-				b.SafeFromPit[np] = true
-				delete(b.PitProb, np)
+	for dy := -1; dy <= 1; dy++ {
+		for dx := -1; dx <= 1; dx++ {
+			if dx == 0 && dy == 0 {
+				continue
 			}
-		}
-	} else {
-		var candidates []world.Pos
-		for dy := -1; dy <= 1; dy++ {
-			for dx := -1; dx <= 1; dx++ {
-				if dx == 0 && dy == 0 {
-					continue
-				}
-				np := world.Pos{X: p.X + dx, Y: p.Y + dy}
-				if !world.InBounds(np.X, np.Y) {
-					continue
-				}
-				if b.SafeFromPit[np] {
-					continue
-				}
-				candidates = append(candidates, np)
+			np := world.Pos{X: p.X + dx, Y: p.Y + dy}
+			if !world.InBounds(np.X, np.Y) {
+				continue
 			}
-		}
-		if len(candidates) == 1 {
-			b.PitProb[candidates[0]] = 1.0
-		} else if len(candidates) > 1 {
-			share := 1.0 / float64(len(candidates))
-			for _, np := range candidates {
-				cur := b.PitProb[np]
-				b.PitProb[np] = cur + (1-cur)*share
-			}
-		}
-	}
-
-	b.WumpusProb = map[world.Pos]float64{}
-	if w.StenchAt(p.X, p.Y) {
-		var candidates []world.Pos
-		for dy := -1; dy <= 1; dy++ {
-			for dx := -1; dx <= 1; dx++ {
-				if dx == 0 && dy == 0 {
-					continue
-				}
-				np := world.Pos{X: p.X + dx, Y: p.Y + dy}
-				if !world.InBounds(np.X, np.Y) {
-					continue
-				}
-				candidates = append(candidates, np)
-			}
-		}
-		if len(candidates) > 0 {
-			share := 1.0 / float64(len(candidates))
-			for _, np := range candidates {
-				b.WumpusProb[np] = share
-			}
+			b.Observed[np] = true
 		}
 	}
 }

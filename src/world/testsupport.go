@@ -3,14 +3,10 @@
 // package boundaries. Not used by production code.
 package world
 
-// EnableHazards re-enables every hazard / TTL toggle on the world.
-// Because the toggle setters are now symmetric (enable-edge spawns,
-// disable-edge clears), this also repopulates the board with fresh
-// wumpus / fire pits / water pits in random positions.
+// EnableHazards is retained as a no-op shim for tests written before
+// the hazard teardown. Hazards no longer exist; the only remaining
+// toggle is TTL, which it leaves enabled.
 func (w *World) EnableHazards() {
-	w.SetWumpusDisabled(false)
-	w.SetFirePitsDisabled(false)
-	w.SetWaterPitsDisabled(false)
 	w.TTLDisabled = false
 }
 

@@ -12,8 +12,7 @@ import (
 // rule.
 func TestPlanFor_DispatchesPerAlgorithm(t *testing.T) {
 	for _, l := range []rune{
-		StrategySwarmBayesian, StrategyBayesian, StrategyScentFollower,
-		StrategyDQN, StrategyPOMCP, StrategyQMDP,
+		StrategySwarmBayesian, StrategyBayesian, StrategyPOMCP, StrategyQMDP,
 	} {
 		if planFor(l) == nil {
 			t.Errorf("planFor(%c) = nil, want a planner", l)
@@ -25,8 +24,8 @@ func TestPlanFor_DispatchesPerAlgorithm(t *testing.T) {
 // their KnownCells; a different group does not leak in.
 func TestSwarmStrategy_SharesKnowledge(t *testing.T) {
 	w := newConfiguredWorld(24)
-	a := world.SpawnAgentForTest(w, '7')
-	b := world.SpawnAgentForTest(w, 'C')
+	a := world.SpawnAgentForTest(w, '6')
+	b := world.SpawnAgentForTest(w, '5')
 	a.CurrentStrategy = StrategyQMDP
 	b.CurrentStrategy = StrategyQMDP
 	a.SwarmGroupID = 5
@@ -47,7 +46,7 @@ func TestSwarmStrategy_SharesKnowledge(t *testing.T) {
 // roster (freeing a slot for future lazy forking — no auto-respawn).
 func TestSwarmClone_ThrashTerminatesAndFreesSlot(t *testing.T) {
 	w := newConfiguredWorld(26)
-	a := world.SpawnAgentForTest(w, '7')
+	a := world.SpawnAgentForTest(w, '6')
 	a.CurrentStrategy = StrategyQMDP
 	a.SwarmGroupID = 1
 	a.Pos = world.Pos{X: 40, Y: 40}
@@ -76,7 +75,7 @@ func TestSwarmClone_ThrashTerminatesAndFreesSlot(t *testing.T) {
 // aggregate, and not the leader's.
 func TestSwarmClone_ExpiresOnIndividualDistance(t *testing.T) {
 	w := newConfiguredWorld(50)
-	a := world.SpawnAgentForTest(w, '7')
+	a := world.SpawnAgentForTest(w, '6')
 	a.CurrentStrategy = StrategyQMDP
 	a.SwarmGroupID = 1
 	a.OptimalDistance = 10 // limit = TTLMultiplier*10 = 30
@@ -124,7 +123,7 @@ func TestSwarmClone_DistinctTrailNotThrashing(t *testing.T) {
 // sharing among leader and clones" requirement.
 func TestSwarmClone_SharesPerceptionWithLeader(t *testing.T) {
 	w := newConfiguredWorld(28)
-	a := world.SpawnAgentForTest(w, '7')
+	a := world.SpawnAgentForTest(w, '6')
 	a.CurrentStrategy = StrategyQMDP
 	a.SwarmGroupID = 1
 	a.Beliefs = world.NewAgentBeliefs()

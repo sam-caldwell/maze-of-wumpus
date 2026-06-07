@@ -27,81 +27,6 @@ func TestIsDiagonal_AllCases(t *testing.T) {
 	}
 }
 
-// TestWumpusHuntModeDescription covers all three known modes plus the
-// fall-through "unknown" branch.
-func TestWumpusHuntModeDescription(t *testing.T) {
-	for _, c := range []struct {
-		mode WumpusHuntMode
-		want string
-	}{
-		{WumpusHuntBayesian, "Inductive Bayesian smell-tracking; aggressiveness gates commit"},
-		{WumpusHuntWander, "Random walk lightly biased by agent scent"},
-		{WumpusHuntCrowd, "Swarm hunting: shared sightings, BFS to nearest detected agent"},
-		{WumpusHuntMode(99), "unknown"},
-	} {
-		if got := WumpusHuntModeDescription(c.mode); got != c.want {
-			t.Errorf("description(mode=%d) = %q, want %q", c.mode, got, c.want)
-		}
-	}
-}
-
-// TestActiveWumpusModes_DeduplicatesAndSkipsDead: only alive wumpus
-// contribute; duplicate modes appear once.
-func TestActiveWumpusModes_DeduplicatesAndSkipsDead(t *testing.T) {
-	w := NewWorld(50)
-	w.EnableHazards()
-	if len(w.Wumpus) < 3 {
-		t.Skip("not enough wumpus at this seed")
-	}
-	for _, wm := range w.Wumpus {
-		wm.Alive = false
-	}
-	w.Wumpus[0].HuntMode = WumpusHuntBayesian
-	w.Wumpus[0].Alive = true
-	w.Wumpus[1].HuntMode = WumpusHuntBayesian
-	w.Wumpus[1].Alive = true
-	w.Wumpus[2].HuntMode = WumpusHuntCrowd
-	w.Wumpus[2].Alive = true
-	modes := w.ActiveWumpusModes()
-	if len(modes) != 2 {
-		t.Errorf("ActiveWumpusModes = %v, want 2 entries (Bayesian + Crowd)", modes)
-	}
-	seen := map[WumpusHuntMode]bool{}
-	for _, m := range modes {
-		if seen[m] {
-			t.Errorf("duplicate mode %v in output", m)
-		}
-		seen[m] = true
-	}
-}
-
-// TestWumpusModeCount: counts only alive wumpus matching the mode.
-func TestWumpusModeCount(t *testing.T) {
-	w := NewWorld(51)
-	w.EnableHazards()
-	if len(w.Wumpus) < 3 {
-		t.Skip("not enough wumpus at this seed")
-	}
-	for _, wm := range w.Wumpus {
-		wm.Alive = false
-	}
-	w.Wumpus[0].HuntMode = WumpusHuntBayesian
-	w.Wumpus[0].Alive = true
-	w.Wumpus[1].HuntMode = WumpusHuntBayesian
-	w.Wumpus[1].Alive = false // dead — must NOT count
-	w.Wumpus[2].HuntMode = WumpusHuntCrowd
-	w.Wumpus[2].Alive = true
-	if got := w.WumpusModeCount(WumpusHuntBayesian); got != 1 {
-		t.Errorf("Bayesian count = %d, want 1 (one alive)", got)
-	}
-	if got := w.WumpusModeCount(WumpusHuntCrowd); got != 1 {
-		t.Errorf("Crowd count = %d, want 1", got)
-	}
-	if got := w.WumpusModeCount(WumpusHuntWander); got != 0 {
-		t.Errorf("Wander count = %d, want 0", got)
-	}
-}
-
 // TestStrategyLettersForWorld covers both the configured and the
 // nil-default cases.
 func TestStrategyLettersForWorld(t *testing.T) {
@@ -228,46 +153,6 @@ func TestAbsInt(t *testing.T) {
 	}
 	if absInt(7) != 7 {
 		t.Errorf("absInt(7) = %d, want 7", absInt(7))
-	}
-}
-
-// TestHeatAt covers disabled + OOB + normal.
-func TestHeatAt(t *testing.T) {
-	w := NewWorld(70)
-	w.EnableHazards()
-	w.Heat[5][5] = true
-	if !w.HeatAt(5, 5) {
-		t.Error("HeatAt(5,5) should be true")
-	}
-	if w.HeatAt(-1, 0) {
-		t.Error("HeatAt(-1,0) should be false (OOB)")
-	}
-	if w.HeatAt(BoardWidth, 0) {
-		t.Error("HeatAt(BoardWidth,0) should be false (OOB)")
-	}
-	w.FirePitsDisabled = true
-	if w.HeatAt(5, 5) {
-		t.Error("HeatAt with FirePitsDisabled should always be false")
-	}
-}
-
-// TestStenchAt covers disabled + OOB + normal.
-func TestStenchAt(t *testing.T) {
-	w := NewWorld(71)
-	w.EnableHazards()
-	w.Stench[5][5] = true
-	if !w.StenchAt(5, 5) {
-		t.Error("StenchAt(5,5) should be true")
-	}
-	if w.StenchAt(-1, 0) {
-		t.Error("StenchAt(-1,0) should be false (OOB)")
-	}
-	if w.StenchAt(0, BoardHeight) {
-		t.Error("StenchAt(0,BoardHeight) should be false (OOB)")
-	}
-	w.WumpusDisabled = true
-	if w.StenchAt(5, 5) {
-		t.Error("StenchAt with WumpusDisabled should always be false")
 	}
 }
 
@@ -409,78 +294,6 @@ func TestPickStrategy_EmptyLetters(t *testing.T) {
 	a.PickStrategy(nil, nil)
 	if a.CurrentStrategy != 0 {
 		t.Errorf("CurrentStrategy = %c, want 0", a.CurrentStrategy)
-	}
-}
-
-// TestSetFirePitsDisabled_NoOp: setting the same value is a no-op.
-func TestSetFirePitsDisabled_NoOp(t *testing.T) {
-	w := NewWorld(75)
-	w.FirePitsDisabled = true
-	w.SetFirePitsDisabled(true) // same value
-	if !w.FirePitsDisabled {
-		t.Error("no-op should leave value unchanged")
-	}
-}
-
-// TestSetFirePitsDisabled_EnableEdge: false → true clears fire pits.
-func TestSetFirePitsDisabled_EnableEdge(t *testing.T) {
-	w := NewWorld(76)
-	w.EnableHazards()
-	w.FirePitsDisabled = false
-	w.SetFirePitsDisabled(true)
-	if !w.FirePitsDisabled {
-		t.Error("expected FirePitsDisabled=true after set")
-	}
-}
-
-// TestSetFirePitsDisabled_DisableEdge: true → false spawns fire pits.
-func TestSetFirePitsDisabled_DisableEdge(t *testing.T) {
-	w := NewWorld(77)
-	w.FirePitsDisabled = true
-	w.SetFirePitsDisabled(false)
-	if w.FirePitsDisabled {
-		t.Error("expected FirePitsDisabled=false after set")
-	}
-}
-
-// TestSetWaterPitsDisabled covers same-value, enable, and disable edges.
-func TestSetWaterPitsDisabled(t *testing.T) {
-	w := NewWorld(78)
-	w.WaterPitsDisabled = false
-	w.SetWaterPitsDisabled(false) // no-op
-	if w.WaterPitsDisabled {
-		t.Error("no-op should leave value unchanged")
-	}
-	w.SetWaterPitsDisabled(true)
-	if !w.WaterPitsDisabled {
-		t.Error("expected WaterPitsDisabled=true")
-	}
-	w.SetWaterPitsDisabled(false)
-	if w.WaterPitsDisabled {
-		t.Error("expected WaterPitsDisabled=false")
-	}
-}
-
-// TestSpawnReplacementWaterPit_Disabled: no-op when disabled.
-func TestSpawnReplacementWaterPit_Disabled(t *testing.T) {
-	w := NewWorld(79)
-	w.WaterPitsDisabled = true
-	before := len(w.Maze.WaterPits)
-	w.SpawnReplacementWaterPit()
-	if len(w.Maze.WaterPits) != before {
-		t.Errorf("SpawnReplacementWaterPit while disabled added a pit")
-	}
-}
-
-// TestSpawnReplacementWaterPit_Spawns: when enabled and there's open
-// space, a fresh water pit appears.
-func TestSpawnReplacementWaterPit_Spawns(t *testing.T) {
-	w := NewWorld(80)
-	w.WaterPitsDisabled = false
-	w.ClearWaterPits()
-	w.SpawnReplacementWaterPit()
-	if len(w.Maze.WaterPits) != 1 {
-		t.Errorf("after spawn, WaterPits = %d, want 1", len(w.Maze.WaterPits))
 	}
 }
 
@@ -640,75 +453,6 @@ func TestPickTrustee_NoLiveLeaders(t *testing.T) {
 	}
 }
 
-// TestSpawnGoalHazard_BothDisabled: returns immediately, no state
-// change.
-func TestSpawnGoalHazard_BothDisabled(t *testing.T) {
-	w := NewWorld(90)
-	w.FirePitsDisabled = true
-	w.WumpusDisabled = true
-	pitsBefore := len(w.Maze.FirePits)
-	wumpusBefore := len(w.Wumpus)
-	w.SpawnGoalHazard()
-	if len(w.Maze.FirePits) != pitsBefore || len(w.Wumpus) != wumpusBefore {
-		t.Errorf("SpawnGoalHazard with both disabled mutated state")
-	}
-}
-
-// TestSpawnReplacementWumpus_Disabled: when WumpusDisabled, returns
-// without spawning.
-func TestSpawnReplacementWumpus_Disabled(t *testing.T) {
-	w := NewWorld(91)
-	w.WumpusDisabled = true
-	before := len(w.Wumpus)
-	w.SpawnReplacementWumpus()
-	if len(w.Wumpus) != before {
-		t.Errorf("SpawnReplacementWumpus while disabled added wumpus")
-	}
-}
-
-// TestSpawnReplacementWumpus_Adds: with WumpusDisabled false, a fresh
-// wumpus is added on a path cell.
-func TestSpawnReplacementWumpus_Adds(t *testing.T) {
-	w := NewWorldWithConfig(Config{Seed: 92})
-	w.WumpusDisabled = false
-	before := len(w.Wumpus)
-	w.SpawnReplacementWumpus()
-	if len(w.Wumpus) != before+1 {
-		t.Errorf("SpawnReplacementWumpus: count %d → %d, want +1", before, len(w.Wumpus))
-	}
-}
-
-// TestFallbackMove_AllNeighborsHazardous: when every neighbor is a
-// hazard, fallback returns one (the second loop allows hazard cells
-// as a last resort).
-func TestFallbackMove_AllNeighborsHazardous(t *testing.T) {
-	w := NewWorld(93)
-	w.EnableHazards()
-	a := w.Agents[0]
-	a.Pos = Pos{40, 40}
-	w.AgentAt[a.Pos.Y][a.Pos.X] = a
-	// Surround with fire pits but make the cells walkable.
-	for dy := -1; dy <= 1; dy++ {
-		for dx := -1; dx <= 1; dx++ {
-			if dx == 0 && dy == 0 {
-				continue
-			}
-			x, y := a.Pos.X+dx, a.Pos.Y+dy
-			w.Maze.Cells[y][x] = CellFirePit
-		}
-	}
-	got := w.FallbackMove(a)
-	// Either a neighbor cell (hazardous, but allowed by second loop)
-	// or stay-in-place when even CanMoveTo refuses. Both are fine.
-	if got == a.Pos {
-		return // stay-in-place branch
-	}
-	dx, dy := got.X-a.Pos.X, got.Y-a.Pos.Y
-	if dx < -1 || dx > 1 || dy < -1 || dy > 1 {
-		t.Errorf("FallbackMove returned non-neighbor %v", got)
-	}
-}
-
 // TestTickAgentClocks_Disabled: a disabled agent skipped (continue
 // branch). A non-alive non-disabled agent leaves TicksAlive unchanged.
 func TestTickAgentClocks_Branches(t *testing.T) {
@@ -812,33 +556,6 @@ func TestBfsAlive_StaleQueueEntrySkipped(t *testing.T) {
 	dist := w.bfsAlive(Pos{20, 20}, alive)
 	if dist[Pos{21, 20}] != CardinalStepCost {
 		t.Errorf("dist = %d, want %d", dist[Pos{21, 20}], CardinalStepCost)
-	}
-}
-
-// TestSpawnGoalHazard_FireOnly: with WumpusDisabled true and fire
-// pits enabled, the spawnFire branch fires and the fire-only switch
-// arm executes.
-func TestSpawnGoalHazard_FireOnly(t *testing.T) {
-	w := NewWorld(100)
-	w.WumpusDisabled = true
-	w.FirePitsDisabled = false
-	pitsBefore := len(w.Maze.FirePits)
-	w.SpawnGoalHazard()
-	if len(w.Maze.FirePits) <= pitsBefore {
-		t.Logf("no fire pit added — possibly no valid candidate after %d attempts", 200)
-	}
-}
-
-// TestSpawnGoalHazard_WumpusOnly: FirePitsDisabled true + WumpusDisabled
-// false → wumpus-only branch.
-func TestSpawnGoalHazard_WumpusOnly(t *testing.T) {
-	w := NewWorld(101)
-	w.FirePitsDisabled = true
-	w.WumpusDisabled = false
-	before := len(w.Wumpus)
-	w.SpawnGoalHazard()
-	if len(w.Wumpus) <= before {
-		t.Logf("no wumpus added — possibly no valid candidate")
 	}
 }
 
@@ -1051,12 +768,12 @@ func TestSwarmLeaderStartsSolo_NoStartedBump(t *testing.T) {
 	}
 }
 
-// TestSwarmCloneSpawn_QmdpSwarmLetterX: strategy 'X' is also a swarm
-// strategy — an agent on X gets a SwarmGroupID (and, lazily, clones).
+// TestSwarmCloneSpawn_QmdpSwarmLetterV: strategy 'V' is also a swarm
+// strategy — an agent on V gets a SwarmGroupID (and, lazily, clones).
 // Joining assigns the group and starts solo.
-func TestSwarmCloneSpawn_QmdpSwarmLetterX(t *testing.T) {
+func TestSwarmCloneSpawn_QmdpSwarmLetterV(t *testing.T) {
 	w := NewWorld(317)
-	a := w.AgentByLabel('7')
+	a := w.AgentByLabel('6')
 	a.CurrentStrategy = QmdpSwarmStrategyLetter
 	a.SwarmGroupID = 0
 	a.SwarmClones = nil
@@ -1108,12 +825,12 @@ func TestMaintainSwarmMembership_RNeverSwarms(t *testing.T) {
 	}
 }
 
-// TestSwarmLeaderPromotion_LetterX: killing an X swarm leader with a
+// TestSwarmLeaderPromotion_LetterV: killing a V swarm leader with a
 // surviving clone promotes the clone into the leader slot (body swap,
 // no real death) — the same generic promotion path S uses.
-func TestSwarmLeaderPromotion_LetterX(t *testing.T) {
+func TestSwarmLeaderPromotion_LetterV(t *testing.T) {
 	w := NewWorld(318)
-	a := SpawnAgentForTest(w, '7')
+	a := SpawnAgentForTest(w, '6')
 	a.CurrentStrategy = QmdpSwarmStrategyLetter
 	a.SwarmGroupID = 0
 	w.maintainSwarmMembership(a)
@@ -1526,4 +1243,3 @@ func TestPruneGraph_Phase2OptIn(t *testing.T) {
 			len(full), len(leafOnly))
 	}
 }
-

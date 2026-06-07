@@ -53,26 +53,21 @@ func TestUpdate_QuitKeys(t *testing.T) {
 
 func TestUpdate_RestartKey_PreservesLearning(t *testing.T) {
 	m := newTestModel(1)
-	bayes := m.World.AgentByLabel('3')    // Bayesian (was '1' pre-renumber)
-	follower := m.World.AgentByLabel('4') // scent-follower
-	dqn := m.World.AgentByLabel('5')      // DQN
-	bayes.Beliefs.SafeFromPit[world.Pos{X: 1, Y: 2}] = true
-	dqn.DQN.W1[0] = 1234.5
-	follower.LearnedTTL = 555
+	bayes := m.World.AgentByLabel('3')   // Bayesian
+	pomcp := m.World.AgentByLabel('5')   // POMCP
+	bayes.Beliefs.Observed[world.Pos{X: 1, Y: 2}] = true
+	pomcp.LearnedTTL = 555
 	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
 	newWorld := m2.(Model).World
 	if newWorld == m.World {
 		t.Fatal("world was not replaced on 'r'")
 	}
-	if !newWorld.AgentByLabel('3').Beliefs.SafeFromPit[world.Pos{X: 1, Y: 2}] {
+	if !newWorld.AgentByLabel('3').Beliefs.Observed[world.Pos{X: 1, Y: 2}] {
 		t.Error("Bayesian beliefs did not carry over")
 	}
-	if newWorld.AgentByLabel('5').DQN.W1[0] != 1234.5 {
-		t.Error("DQN weights did not carry over")
-	}
-	if newWorld.AgentByLabel('4').LearnedTTL != 555 {
+	if newWorld.AgentByLabel('5').LearnedTTL != 555 {
 		t.Errorf("LearnedTTL did not carry over: %d, want 555",
-			newWorld.AgentByLabel('4').LearnedTTL)
+			newWorld.AgentByLabel('5').LearnedTTL)
 	}
 }
 
@@ -88,63 +83,6 @@ func TestUpdate_ShowPathKey(t *testing.T) {
 	m3, _ := m2.(Model).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
 	if m3.(Model).ShowPath {
 		t.Error("second 's' did not flip ShowPath off")
-	}
-}
-
-// TestUpdate_WumpusToggle: 'w' flips WumpusDisabled. Default is
-// disabled-by-default, so the first 'w' should ENABLE wumpus.
-func TestUpdate_WumpusToggle(t *testing.T) {
-	m := newTestModel(1)
-	if !m.World.WumpusDisabled {
-		t.Fatal("WumpusDisabled should default to true")
-	}
-	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("w")})
-	if m2.(Model).World.WumpusDisabled {
-		t.Error("'w' did not enable wumpus (WumpusDisabled should now be false)")
-	}
-	m3, _ := m2.(Model).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("w")})
-	if !m3.(Model).World.WumpusDisabled {
-		t.Error("second 'w' did not flip WumpusDisabled back on")
-	}
-}
-
-// TestUpdate_FireToggle: 'f' flips both FirePitsDisabled and
-// WaterPitsDisabled together. Defaults are disabled, so the first
-// 'f' should ENABLE both.
-func TestUpdate_FireToggle(t *testing.T) {
-	m := newTestModel(1)
-	if !m.World.FirePitsDisabled || !m.World.WaterPitsDisabled {
-		t.Fatal("pits should default to disabled")
-	}
-	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
-	if m2.(Model).World.FirePitsDisabled {
-		t.Error("'f' did not enable fire pits")
-	}
-	if m2.(Model).World.WaterPitsDisabled {
-		t.Error("'f' did not enable water pits")
-	}
-	m3, _ := m2.(Model).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
-	if !m3.(Model).World.FirePitsDisabled || !m3.(Model).World.WaterPitsDisabled {
-		t.Error("second 'f' did not flip both back to disabled")
-	}
-}
-
-// TestView_TogglesReflectedInStatus: the status footer should show
-// wumpus, pits, and ttl states. Defaults: wumpus/pits OFF, ttl ON.
-func TestView_TogglesReflectedInStatus(t *testing.T) {
-	m := newTestModel(1)
-	v := m.View()
-	for _, want := range []string{"wumpus:OFF", "pits:OFF", "ttl:on"} {
-		if !strings.Contains(v, want) {
-			t.Errorf("status missing %q at startup defaults", want)
-		}
-	}
-	m.World.EnableHazards()
-	v = m.View()
-	for _, want := range []string{"wumpus:on", "pits:on", "ttl:on"} {
-		if !strings.Contains(v, want) {
-			t.Errorf("status missing %q after EnableHazards", want)
-		}
 	}
 }
 
@@ -168,11 +106,11 @@ func TestView_PerAgentTTLColumn(t *testing.T) {
 	}
 }
 
-// TestUpdate_AgentToggles: '1'..'7' flips each agent's Disabled flag.
-// All seven agents start enabled by default.
+// TestUpdate_AgentToggles: '1'..'6' flips each agent's Disabled flag.
+// All six agents start enabled by default.
 func TestUpdate_AgentToggles(t *testing.T) {
 	m := newTestModel(1)
-	for _, key := range []string{"1", "2", "3", "4", "5", "6", "7"} {
+	for _, key := range []string{"1", "2", "3", "4", "5", "6"} {
 		a := m.World.AgentByLabel(rune(key[0]))
 		if a.Disabled {
 			t.Fatalf("agent %s should default to enabled (Disabled=false)", key)
@@ -202,28 +140,6 @@ func TestUpdate_TTLToggle(t *testing.T) {
 	m3, _ := m2.(Model).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
 	if m3.(Model).World.TTLDisabled {
 		t.Error("second 't' did not re-enable TTL")
-	}
-}
-
-// TestGlyphAt_HidesDisabledHazards: with wumpus / fire disabled the
-// glyph layer renders path cells where they used to live.
-func TestGlyphAt_HidesDisabledHazards(t *testing.T) {
-	m := newTestModel(1)
-	w := m.World
-	w.EnableHazards() // start with hazards so we have entities to disable
-	// Plant a wumpus and fire pit at known cells.
-	w.Maze.Cells[3][3] = world.CellFirePit
-	wm := w.Wumpus[0]
-	w.WumpusAt[wm.Pos.Y][wm.Pos.X] = nil
-	wm.Pos = world.Pos{X: 4, Y: 4}
-	w.WumpusAt[4][4] = wm
-	w.WumpusDisabled = true
-	w.FirePitsDisabled = true
-	if got := m.glyphAt(w, 4, 4); got == wumpusGlyph {
-		t.Error("wumpus glyph rendered while disabled")
-	}
-	if got := m.glyphAt(w, 3, 3); got == firePitGlyph {
-		t.Error("fire pit glyph rendered while disabled")
 	}
 }
 
@@ -403,7 +319,6 @@ func TestView_GoalsBanner(t *testing.T) {
 func TestGlyphAt_AllCellTypes(t *testing.T) {
 	m := newTestModel(1)
 	w := m.World
-	w.EnableHazards() // glyphs for wumpus / fire pits etc. only render when enabled
 	w.Maze.Cells[5][5] = world.CellWall
 	if m.glyphAt(w, 5, 5) != wallGlyph {
 		t.Error("wall glyph mismatch")
@@ -412,10 +327,6 @@ func TestGlyphAt_AllCellTypes(t *testing.T) {
 	if m.glyphAt(w, 5, 5) != pathGlyph {
 		t.Error("path glyph mismatch")
 	}
-	w.Maze.Cells[5][5] = world.CellFirePit
-	if m.glyphAt(w, 5, 5) != firePitGlyph {
-		t.Error("firepit glyph mismatch")
-	}
 	w.Maze.Cells[5][5] = world.CellGoal
 	if m.glyphAt(w, 5, 5) != goalGlyph {
 		t.Error("goal glyph mismatch")
@@ -423,27 +334,6 @@ func TestGlyphAt_AllCellTypes(t *testing.T) {
 	w.Maze.Cells[5][5] = world.CellEntrance
 	if m.glyphAt(w, 5, 5) != entranceGlyph {
 		t.Error("entrance glyph mismatch")
-	}
-	w.Maze.Cells[5][5] = world.CellPath
-	w.Heat[5][5] = true
-	if m.glyphAt(w, 5, 5) != heatGlyph {
-		t.Error("heat glyph mismatch")
-	}
-	w.Heat[5][5] = false
-	w.Stench[5][5] = true
-	if m.glyphAt(w, 5, 5) != stenchGlyph {
-		t.Error("stench glyph mismatch")
-	}
-	w.Heat[5][5] = true
-	w.Stench[5][5] = true
-	if m.glyphAt(w, 5, 5) != stenchHeatGl {
-		t.Error("heat+stench glyph mismatch")
-	}
-	w.Heat[5][5] = false
-	w.Stench[5][5] = false
-	w.Maze.Cells[5][5] = world.CellWaterPit
-	if m.glyphAt(w, 5, 5) != waterPitGlyph {
-		t.Error("water pit glyph mismatch")
 	}
 	w.Maze.Cells[5][5] = world.CellPath
 	w.ScentOwner[5][5] = '1'
@@ -464,17 +354,11 @@ func TestGlyphAt_AllCellTypes(t *testing.T) {
 	}
 	w.ScentOwner[5][5] = '5'
 	if m.glyphAt(w, 5, 5) != scent5Glyph {
-		t.Error("scent E glyph mismatch")
+		t.Error("scent 5 glyph mismatch")
 	}
-	farSightScents := map[rune]string{
-		'8': scent8Glyph, '9': scent9Glyph, 'A': scentAGlyph,
-		'B': scentBGlyph, 'C': scentCGlyph,
-	}
-	for label, want := range farSightScents {
-		w.ScentOwner[5][5] = label
-		if got := m.glyphAt(w, 5, 5); got != want {
-			t.Errorf("scent %c glyph mismatch: %q", label, got)
-		}
+	w.ScentOwner[5][5] = '6'
+	if m.glyphAt(w, 5, 5) != scent6Glyph {
+		t.Error("scent 6 glyph mismatch")
 	}
 	w.ScentOwner[5][5] = 'Z'
 	if m.glyphAt(w, 5, 5) != pathGlyph {
@@ -503,17 +387,11 @@ func TestGlyphAt_AllCellTypes(t *testing.T) {
 	}
 	a.Label = '5'
 	if m.glyphAt(w, 5, 5) != agent5Glyph {
-		t.Error("agent E glyph mismatch")
+		t.Error("agent 5 glyph mismatch")
 	}
-	farSightAgents := map[rune]string{
-		'8': agent8Glyph, '9': agent9Glyph, 'A': agentAGlyph,
-		'B': agentBGlyph, 'C': agentCGlyph,
-	}
-	for label, want := range farSightAgents {
-		a.Label = label
-		if got := m.glyphAt(w, 5, 5); got != want {
-			t.Errorf("agent %c glyph mismatch: %q", label, got)
-		}
+	a.Label = '6'
+	if m.glyphAt(w, 5, 5) != agent6Glyph {
+		t.Error("agent 6 glyph mismatch")
 	}
 }
 

@@ -8,15 +8,11 @@ import (
 
 // branchTestWorld carves a 4-way junction at (40, 40) with walkable
 // neighbors on every cardinal side, and parks the agent at the
-// junction. Wumpus and fire pits are killed so they don't block the
-// branches.
+// junction.
 func branchTestWorld(t *testing.T, seed int64, label rune) (*world.World, *world.Agent) {
 	t.Helper()
 	w := newConfiguredWorld(seed)
-	w.EnableHazards()
-	killAllWumpus(w)
 	a := world.SpawnAgentForTest(w, label)
-	a.Water = 1 // suppress water-secondary-goal so the planner targets the goal
 	// Build a 4-way junction so branchCandidates returns multiple.
 	w.AgentAt[a.Pos.Y][a.Pos.X] = nil
 	a.Pos = world.Pos{X: 40, Y: 40}
@@ -25,11 +21,6 @@ func branchTestWorld(t *testing.T, seed int64, label rune) (*world.World, *world
 	for _, d := range world.Cardinals {
 		np := world.Pos{X: a.Pos.X + d.X, Y: a.Pos.Y + d.Y}
 		w.Maze.Cells[np.Y][np.X] = world.CellPath
-		// Stamp out any fire pit that EnableHazards placed at this
-		// neighbor — branchCandidates filters hazards, and we need
-		// all four cardinals open for the test to produce a ≥2-way
-		// branch reliably regardless of seed.
-		w.ExtinguishFirePit(np)
 	}
 	// Force the goal to a cardinal neighbor so BFSStrategy can
 	// always produce a plan from this synthetic junction — without
@@ -103,10 +94,7 @@ func TestBranchAnim_ExpandThenRetractThenCommit(t *testing.T) {
 // the forward cell is walkable and non-backwards) does NOT animate.
 func TestBranchAnim_NoAnimInCorridor(t *testing.T) {
 	w := newConfiguredWorld(402)
-	w.EnableHazards()
-	killAllWumpus(w)
 	a := world.SpawnAgentForTest(w, '2')
-	a.Water = 1
 	w.AgentAt[a.Pos.Y][a.Pos.X] = nil
 	a.Pos = world.Pos{X: 40, Y: 40}
 	w.AgentAt[40][40] = a

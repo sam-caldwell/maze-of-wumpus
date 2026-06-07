@@ -19,14 +19,12 @@ import (
 )
 
 // Per-algorithm dispersion weights. Tuned to each planner's score
-// scale (QMDP's explore term can reach the hundreds; scent and the
-// rollout/Q values are O(1-10)). Exposed as named constants so the
-// strength is easy to retune from live runs.
+// scale (QMDP's explore term can reach the hundreds; the rollout
+// values are O(1-10)). Exposed as named constants so the strength is
+// easy to retune from live runs.
 const (
 	qmdpRepelWeight  = 8.0
 	pomcpRepelWeight = 2.0
-	dqnRepelWeight   = 2.0
-	scentRepelWeight = 0.5
 )
 
 // swarmDispersionPenalty returns a positive penalty for moving to `np`

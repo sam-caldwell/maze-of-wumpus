@@ -157,11 +157,11 @@ func trustCell(score float64, present bool, isDiag bool) string {
 // rendered text lines (one per row). The caller splices these next
 // to the maze grid in View. The shape is:
 //
-//	   1 2 3 4 5 6 7 8 9 A B C    ← header row (column labels)
-//	1  · - - - - - - - - - - -    ← agent 1's outgoing trust
-//	2  - · - - - - - - - - - -
+//	   1 2 3 4 5 6    ← header row (column labels)
+//	1  · - - - - -    ← agent 1's outgoing trust
+//	2  - · - - - -
 //	...
-//	C  - - - - - - - - - - - ·    ← agent C's outgoing trust
+//	6  - - - - - ·    ← agent 6's outgoing trust
 func renderTrustMatrixLines(w *world.World) []string {
 	lines := make([]string, 0, len(w.Agents)+2+len(trustHeatFG)/2+1)
 	// Title line above the grid.
@@ -202,9 +202,24 @@ func renderTrustMatrixLines(w *world.World) []string {
 		}
 		lines = append(lines, b.String())
 	}
+	// When the roster has fewer rows than the legend needs (half = 8),
+	// emit the leftover legend entries on their own lines so the full
+	// 0..15 heat scale always renders, left-padded to clear the matrix.
+	leftPad := 2 + 2*len(w.Agents)
+	for i := len(w.Agents); i < half && i < len(legendCellByIdx); i++ {
+		var b strings.Builder
+		for j := 0; j < leftPad; j++ {
+			b.WriteByte(' ')
+		}
+		b.WriteString("  ")
+		b.WriteString(legendCell(i))
+		b.WriteString("  ")
+		b.WriteString(legendCell(i + half))
+		lines = append(lines, b.String())
+	}
 	// Agent-Algorithm Trust matrix sits below the legend. Rows are
 	// agents (same order as above); columns are strategy letters
-	// (R/S/T/U/V/W/X). Cells encode StrategyTrustScores using the
+	// (R/S/T/U/V). Cells encode StrategyTrustScores using the
 	// same heat scale as the Agent-Agent matrix.
 	lines = append(lines, "")
 	lines = append(lines, trustMatrixTitleStyle.Render("Agent-Algorithm Trust"))
@@ -296,22 +311,6 @@ func renderTrustMatrixLines(w *world.World) []string {
 		}
 		lines = append(lines, fmt.Sprintf("%c  %s", l, desc))
 	}
-	// Wumpus Strategies legend: one row per hunt mode currently in
-	// use by at least one alive wumpus. Spacer + bold title first.
-	lines = append(lines, "")
-	lines = append(lines, trustMatrixTitleStyle.Render("Wumpus Strategies"))
-	active := w.ActiveWumpusModes()
-	if len(active) == 0 {
-		lines = append(lines, "  (no active wumpus)")
-	}
-	for _, mode := range active {
-		desc := world.WumpusHuntModeDescription(mode)
-		if len(desc) > 64 {
-			desc = desc[:64]
-		}
-		count := w.WumpusModeCount(mode)
-		lines = append(lines, fmt.Sprintf("%3d  %s", count, desc))
-	}
 	// Events table: bottom panel that scrolls newest-at-bottom. Always
 	// renders exactly world.EventsVisible lines (padded with blanks
 	// when the buffer hasn't filled yet).
@@ -331,6 +330,18 @@ func renderTrustMatrixLines(w *world.World) []string {
 		}
 	}
 	return lines
+}
+
+// legendSpillRows returns how many heat-legend entries must spill
+// onto their own lines below the agent rows — i.e. the shortfall
+// between the roster size and the legend's half-height (8). Returns 0
+// when the roster is at least 8 rows tall.
+func legendSpillRows(numAgents int) int {
+	half := len(trustHeatFG) / 2
+	if numAgents >= half {
+		return 0
+	}
+	return half - numAgents
 }
 
 // legendCell renders one "glyph value" pair for the legend, with

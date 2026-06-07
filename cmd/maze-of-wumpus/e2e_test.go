@@ -58,18 +58,17 @@ func TestE2E_HeadlessOutputFormat(t *testing.T) {
 		t.Fatalf("no output lines")
 	}
 	// Build a per-agent matcher fragment for each label in the
-	// current 12-agent lineup so the regex stays in lockstep with
+	// current 6-agent lineup so the regex stays in lockstep with
 	// any future renumbering.
 	agentPattern := func(label string) string {
 		return label + `_alive=(true|false) ` +
 			label + `_deaths=\d+ ` +
-			label + `_kills=\d+ ` +
 			label + `_goals=\d+ ` +
 			label + `_dist=\d+ ` +
 			label + `_score=-?\d+\.\d+ `
 	}
-	pat := `^cycle=(\d+) wumpus_died=\d+ wumpus_alive=\d+ optimal=\d+ paths=\d+ `
-	for _, l := range []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "A", "B", "C"} {
+	pat := `^cycle=(\d+) optimal=\d+ paths=\d+ `
+	for _, l := range []string{"1", "2", "3", "4", "5", "6"} {
 		pat += agentPattern(l)
 	}
 	pat += `game_over=(true|false)$`
@@ -153,17 +152,7 @@ func TestE2E_InitialPopulationMatches(t *testing.T) {
 	if !strings.HasPrefix(first, "cycle=0") {
 		t.Errorf("first line not cycle=0: %q", first)
 	}
-	re := regexp.MustCompile(`wumpus_alive=(\d+)`)
-	m := re.FindStringSubmatch(first)
-	if m == nil {
-		t.Fatalf("could not find wumpus_alive in %q", first)
-	}
-	n, _ := strconv.Atoi(m[1])
-	// Wumpus default to disabled at construction → none exist.
-	if n != 0 {
-		t.Errorf("wumpus_alive=%d, want 0 (default-disabled)", n)
-	}
-	for _, l := range []string{"1_alive=", "2_alive=", "3_alive=", "4_alive=", "5_alive=", "6_alive=", "7_alive="} {
+	for _, l := range []string{"1_alive=", "2_alive=", "3_alive=", "4_alive=", "5_alive=", "6_alive="} {
 		if !strings.Contains(first, l) {
 			t.Errorf("missing %s in first record: %q", l, first)
 		}

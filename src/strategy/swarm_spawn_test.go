@@ -11,7 +11,7 @@ import (
 // any fully-explored direction are excluded.
 func TestUntakenUnexploredBranches(t *testing.T) {
 	w := newConfiguredWorld(30)
-	a := world.SpawnAgentForTest(w, '7')
+	a := world.SpawnAgentForTest(w, '6')
 	a.Pos = world.Pos{X: 50, Y: 50}
 	full := map[world.Pos]bool{}
 	for _, p := range []world.Pos{{X: 50, Y: 50}, {X: 50, Y: 49}, {X: 50, Y: 51}, {X: 49, Y: 50}, {X: 51, Y: 50}} {
@@ -39,12 +39,13 @@ func TestUntakenUnexploredBranches(t *testing.T) {
 // TestApplyForks_RespectsCap: forking more cells than the cap yields
 // exactly SwarmClonesPerLeader clones.
 func TestApplyForks_RespectsCap(t *testing.T) {
+	w := newConfiguredWorld(33)
 	a := &world.Agent{}
 	forks := make([]forkReq, world.SwarmClonesPerLeader+5)
 	for i := range forks {
 		forks[i] = forkReq{at: world.Pos{X: i, Y: 0}}
 	}
-	applyForks(a, forks)
+	applyForks(w, a, forks)
 	if len(a.SwarmClones) != world.SwarmClonesPerLeader {
 		t.Errorf("clones = %d, want cap %d", len(a.SwarmClones), world.SwarmClonesPerLeader)
 	}
@@ -55,7 +56,7 @@ func TestApplyForks_RespectsCap(t *testing.T) {
 // (lazy spawn). QMDP forks branches of comparable utility.
 func TestSwarmStrategy_SoloLeaderForksAtJunction(t *testing.T) {
 	w := newConfiguredWorld(33)
-	a := world.SpawnAgentForTest(w, '7')
+	a := world.SpawnAgentForTest(w, '6')
 	a.CurrentStrategy = StrategyQMDP
 	a.SwarmGroupID = 1
 	a.Beliefs = world.NewAgentBeliefs()
@@ -108,7 +109,7 @@ func TestFrontierSectorReps_OpenRoomMultipleDirections(t *testing.T) {
 // slots are free (open-space saturation), bounded by the cap.
 func TestSwarmRegionForks_SaturatesOpenSpace(t *testing.T) {
 	w := newConfiguredWorld(41)
-	a := world.SpawnAgentForTest(w, '7')
+	a := world.SpawnAgentForTest(w, '6')
 	a.CurrentStrategy = StrategyQMDP
 	a.SwarmGroupID = 1
 	a.Beliefs = world.NewAgentBeliefs()
@@ -141,7 +142,7 @@ func TestSwarmRegionForks_SaturatesOpenSpace(t *testing.T) {
 // once the goal is perceived; otherwise higher closer to peers.
 func TestSwarmDispersionPenalty_GatedAndRepels(t *testing.T) {
 	w := newConfiguredWorld(31)
-	a := world.SpawnAgentForTest(w, '7')
+	a := world.SpawnAgentForTest(w, '6')
 	a.KnownCells = map[world.Pos]bool{}
 	if swarmDispersionPenalty(w, a, world.Pos{X: 10, Y: 10}) != 0 {
 		t.Error("no peers → penalty should be 0")
@@ -162,7 +163,7 @@ func TestSwarmDispersionPenalty_GatedAndRepels(t *testing.T) {
 // gets a known-graph path to it that its planner can replay.
 func TestSeedGoalConvergencePath(t *testing.T) {
 	w := newConfiguredWorld(32)
-	a := world.SpawnAgentForTest(w, '7')
+	a := world.SpawnAgentForTest(w, '6')
 	goal := w.Maze.GoalPos
 	a.Pos = world.Pos{X: goal.X - 1, Y: goal.Y}
 	w.Maze.Cells[a.Pos.Y][a.Pos.X] = world.CellPath

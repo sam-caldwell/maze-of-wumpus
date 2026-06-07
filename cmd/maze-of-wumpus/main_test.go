@@ -107,34 +107,12 @@ func TestWriteHeadlessState_PerAgentFields(t *testing.T) {
 	writeHeadlessState(&buf, w)
 	s := buf.String()
 	for _, want := range []string{
-		"1_alive=", "2_alive=", "3_alive=", "4_alive=", "5_alive=", "6_alive=", "7_alive=",
-		"1_score=", "2_score=", "3_score=", "4_score=", "5_score=", "6_score=", "7_score=",
+		"1_alive=", "2_alive=", "3_alive=", "4_alive=", "5_alive=", "6_alive=",
+		"1_score=", "2_score=", "3_score=", "4_score=", "5_score=", "6_score=",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("missing %q in output: %s", want, s)
 		}
-	}
-}
-
-// TestWriteHeadlessState_AliveWumpusCounts: with wumpus enabled the
-// wumpus_alive count must equal the number of live wumpus (covers
-// the loop body that increments aliveWumpus).
-func TestWriteHeadlessState_AliveWumpusCounts(t *testing.T) {
-	w := buildWorld(124)
-	w.EnableHazards() // spawns wumpus
-	want := 0
-	for _, wm := range w.Wumpus {
-		if wm.Alive {
-			want++
-		}
-	}
-	if want == 0 {
-		t.Skip("no alive wumpus at this seed")
-	}
-	var buf bytes.Buffer
-	writeHeadlessState(&buf, w)
-	if !strings.Contains(buf.String(), "wumpus_alive=") {
-		t.Error("missing wumpus_alive in output")
 	}
 }
 
@@ -202,10 +180,6 @@ func TestReseedHeadless_PreservesLearningState(t *testing.T) {
 		if a.Beliefs == nil {
 			a.Beliefs = world.NewAgentBeliefs()
 		}
-		if a.DQN == nil {
-			a.DQN = world.NewDQN(prev.Rng)
-		}
-		a.DQN.HasPending = true
 		a.TrustScores = map[rune]float64{'Z': 4.2}
 		a.LearnedTTL = 999
 	}
@@ -217,12 +191,6 @@ func TestReseedHeadless_PreservesLearningState(t *testing.T) {
 		newA := next.Agents[i]
 		if newA.Beliefs != oldA.Beliefs {
 			t.Errorf("agent %c: Beliefs not preserved", newA.Label)
-		}
-		if newA.DQN != oldA.DQN {
-			t.Errorf("agent %c: DQN not preserved", newA.Label)
-		}
-		if newA.DQN.HasPending {
-			t.Errorf("agent %c: DQN.HasPending should reset to false", newA.Label)
 		}
 		if v, ok := newA.TrustScores['Z']; !ok || v != 4.2 {
 			t.Errorf("agent %c: TrustScores not preserved (got %v)", newA.Label, newA.TrustScores)
@@ -239,7 +207,7 @@ func TestReseedHeadless_PreservesLearningState(t *testing.T) {
 func TestReseedHeadless_HandlesShorterNextAgents(t *testing.T) {
 	prev := buildWorld(102)
 	// Add a phantom 13th agent to prev so the loop must early-break
-	// when iterating against the next world (which has 12 agents).
+	// when iterating against the next world (which has 6 agents).
 	prev.Agents = append(prev.Agents, prev.Agents[0])
 	next := reseedHeadless(prev) // must not panic
 	if next == nil {
@@ -309,15 +277,10 @@ func TestRunHeadless_DirectInvoke(t *testing.T) {
 
 func TestBuildWorld_AttachesStrategies(t *testing.T) {
 	w := buildWorld(7)
-	for _, label := range []rune{'1', '2', '3', '4', '5', '6', '7'} {
+	for _, label := range []rune{'1', '2', '3', '4', '5', '6'} {
 		a := w.AgentByLabel(label)
 		if a.Strategy == nil {
 			t.Errorf("agent %c missing strategy", label)
-		}
-	}
-	for _, wm := range w.Wumpus {
-		if wm.Strategy == nil {
-			t.Errorf("wumpus #%d missing strategy", wm.ID)
 		}
 	}
 }

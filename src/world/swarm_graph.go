@@ -81,14 +81,10 @@ func (w *World) SwarmAliveCell(groupID int, p Pos) bool {
 // Solo prune runs Phase 1 only (leaf-trim) — phase 2 articulation
 // pruning is too aggressive for a single agent's sparse anchor set,
 // dropping side branches that the agent legitimately wants to
-// explore (scent gradients, water pits).
+// explore (scent gradients).
 //
 // Extra anchors:
 //   - a.Pos (so the planner can plan FROM the agent's current cell)
-//   - Every perceived water pit (so the water override's PO BFS can
-//     still reach it; without this, a known water pit at the end of
-//     a degree-1 corridor would be leaf-trimmed and become invisible
-//     to NearestKnownWaterPit / bfsTowardKnown).
 //
 // Result lands on a.PrunedKnownCells — a set of cells the agent's
 // solo planner should treat as the effective walkable space. The
@@ -101,11 +97,6 @@ func (w *World) RecomputeAgentPrunedViewIfStale(a *Agent) {
 		return
 	}
 	extra := []Pos{a.Pos}
-	for _, p := range w.Maze.WaterPits {
-		if a.KnownCells[p] {
-			extra = append(extra, p)
-		}
-	}
 	a.PrunedKnownCells = w.pruneGraph(a.KnownCells, extra, false)
 	a.prunedKnownSize = cur
 }

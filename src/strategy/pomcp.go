@@ -9,9 +9,6 @@
 // where it started — `w.DistFromStart` is the legitimate signal,
 // since the entrance is where every life begins.
 //
-//   - Belief: reuse agent 1's AgentBeliefs (PitProb / WumpusProb).
-//     No particle filter — we use the analytic posterior directly.
-//
 //   - Action evaluation: for each of the 4 cardinal moves, run
 //     PomcpRollouts random-walk rollouts of depth PomcpRolloutDepth.
 //     Terminal goal reward (+pomcpGoalReward) fires ONLY when the
@@ -19,8 +16,8 @@
 //     equivalent to the agent sensing glitter when it's there.
 //
 //   - Rollout policy: outward-biased weighted random walk — weight
-//     by safety × (1 + DistFromStart). Rollouts naturally drift
-//     away from the entrance into unexplored terrain.
+//     by (1 + DistFromStart). Rollouts naturally drift away from the
+//     entrance into unexplored terrain.
 //
 // Tradeoff: without a goal-direction signal, rollouts in a large
 // maze rarely stumble onto the goal randomly. Convergence is slower
@@ -42,9 +39,8 @@ const (
 	PomcpRolloutDepth = 100 // deeper rollouts to let random-walk
 	// stumble onto the goal without a
 	// goal-direction heuristic
-	pomcpStepCost     = 1.0     // per-step penalty
-	pomcpDeathPenalty = 100.0   // implicit cost for sampling hazardous cell
-	pomcpGoalReward   = 10000.0 // fires only on actual goal-cell step
+	pomcpStepCost   = 1.0     // per-step penalty
+	pomcpGoalReward = 10000.0 // fires only on actual goal-cell step
 	pomcpGamma        = 0.99
 	pomcpExploreBonus = 10.0 // per-DistFromStart unit, depth-limit fallback
 )
@@ -138,10 +134,8 @@ func meanRolloutReturn(w *world.World, a *world.Agent, start world.Pos, rng *ran
 //
 //  1. Charge step cost.
 //  2. If on goal cell, add goal reward and break.
-//  3. If belief says cell is hazardous (PitProb≥0.5 or any
-//     WumpusProb), subtract death penalty and break.
-//  4. Otherwise weighted-sample the next cell from walkable
-//     cardinal neighbors, biased by closer-to-goal + safer.
+//  3. Otherwise weighted-sample the next cell from walkable
+//     cardinal neighbors, biased by outward exploration.
 //
 // Rewards are discounted by γ at each step to match the QMDP
 // value used by agent 6, keeping the two agents' utility scales
@@ -160,12 +154,6 @@ func pomcpRollout(w *world.World, a *world.Agent, from world.Pos, rng *rand.Rand
 		if pos == w.Maze.GoalPos && a.KnownCells != nil && a.KnownCells[pos] {
 			reward += discount * pomcpGoalReward
 			return reward
-		}
-		if a.Beliefs != nil {
-			if a.Beliefs.PitProb[pos] >= 0.5 || a.Beliefs.WumpusProb[pos] > 0 {
-				reward -= discount * pomcpDeathPenalty
-				return reward
-			}
 		}
 		pos = pomcpSampleNext(w, a, pos, rng)
 		discount *= pomcpGamma
@@ -186,7 +174,7 @@ func pomcpRollout(w *world.World, a *world.Agent, from world.Pos, rng *rand.Rand
 }
 
 // pomcpSampleNext picks a next cell from `pos`'s walkable cardinal
-// neighbors via softmax over closer-to-goal × safety. Falls back
+// neighbors via softmax over the outward-bias weight. Falls back
 // to uniform random if no neighbor scores positively. The caller-
 // supplied rng is used so concurrent rollouts don't race on a shared
 // random source.
@@ -210,16 +198,9 @@ func pomcpSampleNext(w *world.World, a *world.Agent, pos world.Pos, rng *rand.Ra
 		if d := a.DistFromStart[np.Y][np.X]; d > 0 {
 			distFromStart = d
 		}
-		var pitP, wumpP float64
-		if a.Beliefs != nil {
-			pitP = a.Beliefs.PitProb[np]
-			wumpP = a.Beliefs.WumpusProb[np]
-		}
-		safety := (1 - pitP) * (1 - wumpP)
-		// Outward bias: weight = safety × (1 + distFromStart). +1 so
-		// neighbors at distance 0 (the entrance) still get nonzero
-		// weight.
-		wt := safety * float64(1+distFromStart)
+		// Outward bias: weight = 1 + distFromStart. +1 so neighbors at
+		// distance 0 (the entrance) still get nonzero weight.
+		wt := float64(1 + distFromStart)
 		// Scent shaping: uses a.CurrentTrustee (the per-journey
 		// picked attract label) — every rollout step inside the
 		// same journey is consistent with the agent's "who do I

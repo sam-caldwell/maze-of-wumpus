@@ -1,7 +1,7 @@
 // Package main: Maze of Wumpus — terminal-UI maze game.
 //
-// On launch a 120x80 maze is procedurally generated. Five agents
-// (A..E) each run a distinct decision strategy and race for the goal.
+// On launch a maze is procedurally generated. Six agents (1..6) each
+// run a distinct decision strategy and race for the goal.
 //
 // Two execution modes:
 //
@@ -30,11 +30,10 @@ import (
 	"maze-of-wumpus/src/strategy"
 	"maze-of-wumpus/src/tui"
 	"maze-of-wumpus/src/world"
-	"maze-of-wumpus/src/wumpus"
 )
 
-// buildWorld constructs a world with the full strategy configuration
-// for both agents and wumpus. Used at launch and by the TUI's reseed.
+// buildWorld constructs a world with the full strategy configuration.
+// Used at launch and by the TUI's reseed.
 func buildWorld(seed int64) *world.World {
 	return world.NewWorldWithConfig(world.Config{
 		Seed:                         seed,
@@ -42,8 +41,6 @@ func buildWorld(seed int64) *world.World {
 		StrategyForLetter:            strategy.ForLetter,
 		StrategyLetters:              strategy.StrategyLetters,
 		StrategyDescriptionForLetter: strategy.DescriptionByLetter,
-		WumpusStrategy:               wumpus.PickStrategy,
-		VengeanceStrategy:            wumpus.ScentStrategy,
 	})
 }
 
@@ -132,9 +129,9 @@ func runHeadlessLoop(w *world.World, steps int, stdout io.Writer) {
 }
 
 // reseedHeadless builds a fresh world for headless mode preserving
-// each agent's Beliefs / QL / DQN / TrustScores. Mirrors the TUI
-// Model helper — trust updates fire per-journey from KillAgent /
-// CheckGoal, not at reseed.
+// each agent's Beliefs / TrustScores. Mirrors the TUI Model helper —
+// trust updates fire per-journey from KillAgent / CheckGoal, not at
+// reseed.
 func reseedHeadless(prevWorld *world.World) *world.World {
 	prev := prevWorld.Agents
 	w := buildWorld(time.Now().UnixNano())
@@ -145,10 +142,6 @@ func reseedHeadless(prevWorld *world.World) *world.World {
 		newA := w.Agents[i]
 		if oldA.Beliefs != nil {
 			newA.Beliefs = oldA.Beliefs
-		}
-		if oldA.DQN != nil {
-			newA.DQN = oldA.DQN
-			newA.DQN.HasPending = false
 		}
 		if oldA.TrustScores != nil {
 			newA.TrustScores = oldA.TrustScores
@@ -161,23 +154,15 @@ func reseedHeadless(prevWorld *world.World) *world.World {
 }
 
 // writeHeadlessState emits one space-separated key=value record per
-// cycle, with per-agent fields for A..E.
+// cycle, with per-agent fields for labels 1..6.
 func writeHeadlessState(out io.Writer, w *world.World) {
-	aliveWumpus := 0
-	for _, wm := range w.Wumpus {
-		if wm.Alive {
-			aliveWumpus++
-		}
-	}
-	fmt.Fprintf(out, "cycle=%d wumpus_died=%d wumpus_alive=%d optimal=%d paths=%d",
-		w.Cycle, w.Stats.WumpusDied, aliveWumpus,
-		w.Stats.OptimalDistance, w.Stats.ShortestPaths)
+	fmt.Fprintf(out, "cycle=%d optimal=%d paths=%d",
+		w.Cycle, w.Stats.OptimalDistance, w.Stats.ShortestPaths)
 	for _, a := range w.Agents {
 		fmt.Fprintf(out,
-			" %c_alive=%v %c_deaths=%d %c_kills=%d %c_goals=%d %c_dist=%d %c_score=%.3f",
+			" %c_alive=%v %c_deaths=%d %c_goals=%d %c_dist=%d %c_score=%.3f",
 			a.Label, a.Alive,
 			a.Label, a.Stats.Deaths,
-			a.Label, a.Stats.WumpusKilled,
 			a.Label, a.Stats.GoalsReached,
 			a.Label, a.Stats.ActualDistance,
 			a.Label, a.Stats.Score(w.Cycle),

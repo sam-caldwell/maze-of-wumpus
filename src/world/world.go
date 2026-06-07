@@ -1,12 +1,11 @@
 // world.go — Maze of Wumpus runtime state and per-tick simulation.
 //
-// Five agents (labeled '1'..'5') share the maze, each running its own
+// Six agents (labeled '1'..'6') share the maze, each running its own
 // decision Strategy. The world package is strategy-agnostic: it holds
-// the data (World, Agent, Wumpus) and the per-tick loop (Step) but
-// does not know which concrete strategy each agent runs. Strategies
-// are injected at construction time via Config.StrategyFor /
-// Config.WumpusStrategy — keeping the world free of import cycles
-// against the strategy and wumpus packages.
+// the data (World, Agent) and the per-tick loop (Step) but does not
+// know which concrete strategy each agent runs. Strategies are
+// injected at construction time via Config.StrategyFor — keeping the
+// world free of import cycles against the strategy package.
 package world
 
 import (
@@ -75,15 +74,6 @@ const TTLMultiplier = 3
 // first time they enter a cell each life.
 const ExplorationBonus = 40.0
 
-// WumpusKillTimeout: a wumpus that fails to kill an agent for this
-// many consecutive cycles teleports to a fresh random walkable cell.
-const WumpusKillTimeout = 30
-
-// PackVengeanceCycles: when one wumpus dies, every other live wumpus
-// enters scent-chase ("vengeance") mode for this many cycles before
-// resuming its own native strategy.
-const PackVengeanceCycles = 20
-
 // BackStepPenalty: extra reward subtracted from the next RL update
 // when an agent moves DIRECTLY back to the cell it just left.
 const BackStepPenalty = 1.0
@@ -140,25 +130,17 @@ type SearchAnim struct {
 // cell to stay put). Strategies may mutate the agent's Plan / Beliefs.
 type Strategy func(*World, *Agent) Pos
 
-// WumpusStrategy is a wumpus's decision function.
-type WumpusStrategy func(*World, *Wumpus) Pos
-
-// AgentBeliefs is agent A's reasoning state. Used only by the
-// Bayesian strategy.
+// AgentBeliefs is an agent's reasoning state — the set of cells it has
+// observed. Used by the Bayesian and swarm strategies for frontier
+// reasoning over the perceived (strict-PO) map.
 type AgentBeliefs struct {
-	Observed    map[Pos]bool
-	SafeFromPit map[Pos]bool
-	PitProb     map[Pos]float64
-	WumpusProb  map[Pos]float64
+	Observed map[Pos]bool
 }
 
 // NewAgentBeliefs returns an empty belief state.
 func NewAgentBeliefs() *AgentBeliefs {
 	return &AgentBeliefs{
-		Observed:    map[Pos]bool{},
-		SafeFromPit: map[Pos]bool{},
-		PitProb:     map[Pos]float64{},
-		WumpusProb:  map[Pos]float64{},
+		Observed: map[Pos]bool{},
 	}
 }
 
@@ -177,7 +159,6 @@ func NewAgentBeliefs() *AgentBeliefs {
 type AgentStats struct {
 	Deaths            int
 	Starts            int
-	WumpusKilled      int
 	GoalsReached      int
 	ActualDistance    int
 	BestSolveDistance int
@@ -233,9 +214,7 @@ type Agent struct {
 	Plan       []Pos
 	Strategy   Strategy
 	Beliefs    *AgentBeliefs
-	DQN        *DQN
 	RespawnIn  int
-	Water      int
 	TicksAlive int
 	Stats      AgentStats
 
@@ -266,7 +245,7 @@ type Agent struct {
 	// Disabled, when true, removes the agent from the simulation
 	// entirely: no clock ticks, no movement, no combat, no respawn,
 	// not rendered by the TUI. Toggled at runtime by the per-agent
-	// number keys '1'..'5'. Defaults to true at construction.
+	// number keys '1'..'6'. Defaults to true at construction.
 	Disabled bool
 
 	// SearchAnim is non-nil while the agent is in the middle of the
@@ -322,8 +301,8 @@ type Agent struct {
 
 	// OpportunisticFollowed is the set of OTHER-AGENT labels whose
 	// scent this agent followed at least once during the current
-	// journey. Strategy U (opportunistic scent-follower) commits a
-	// label to this set every time it picks a scent-driven move
+	// journey. A scent-using strategy commits a label to this set
+	// every time it picks a scent-driven move
 	// onto a cell whose scent owner isn't the agent itself. On a
 	// successful journey, every label in this set receives a
 	// TrustGoalBonus (and, if the run came in under TTL, the
@@ -331,7 +310,7 @@ type Agent struct {
 	// after endJourney consumes it.
 	OpportunisticFollowed map[rune]bool
 
-	// CurrentStrategy is the algorithm letter (R/S/T/U/V/W/X) the
+	// CurrentStrategy is the algorithm letter (R/S/T/U/V) the
 	// agent is using for THIS journey. Picked at the start of each
 	// life by PickStrategy. Drives action selection through the
 	// world's strategyForLetter dispatch.
@@ -359,8 +338,8 @@ type Agent struct {
 	KnownShortestPath []Pos
 
 	// SmellRadius bounds the BFS depth of ScentSensedCells — the
-	// agent's *olfactory* range, used for trustee/scent shaping
-	// and DQN scent slots. Defaults to DefaultSmellRadius (2).
+	// agent's *olfactory* range, used for trustee/scent shaping.
+	// Defaults to DefaultSmellRadius (2).
 	// Moore-connected, wall-blocked.
 	SmellRadius int
 
@@ -466,62 +445,6 @@ type Agent struct {
 	LearnedTTL int
 }
 
-// Wumpus: adversarial automaton.
-type Wumpus struct {
-	ID    int
-	Pos   Pos
-	Alive bool
-	// Aggressiveness in [0, WumpusAggressionMax]. 0 → opportunistic
-	// (lazy random wander; only kills agents who walk adjacent on
-	// their own). WumpusAggressionMax → actively hunts agents via
-	// scent every tick. Assigned uniformly at random when the
-	// wumpus is constructed (NewWorldWithConfig or
-	// SpawnReplacementWumpus). The same value is also displayed by
-	// the wumpus's strategy at decision time — see
-	// wumpus.HuntStrategy.
-	Aggressiveness int
-	// HuntMode picks one of three strategies (Bayesian-smell,
-	// Wander+scent, Crowd-hunt) for the lifetime of the wumpus.
-	// Assigned uniformly at construction.
-	HuntMode        WumpusHuntMode
-	Strategy        WumpusStrategy
-	QL              *QLearning
-	DQN             *DQN
-	CyclesSinceKill int
-	VengeanceCycles int
-}
-
-// WumpusAggressionMax is the upper bound of Wumpus.Aggressiveness;
-// matches the 0-15 trust heat scale so the value fits the same
-// visual encoding if exposed in the UI later.
-const WumpusAggressionMax = 15
-
-// WumpusHuntMode picks which of three hunting strategies a wumpus
-// uses for its entire life. Assigned at construction.
-type WumpusHuntMode int
-
-const (
-	// WumpusHuntBayesian — inductive Bayesian reasoning with smell
-	// detection: the wumpus scores its cardinal neighbors by the
-	// strongest agent-scent freshness within smelling range and
-	// moves toward the inferred agent direction. Aggressiveness
-	// scales the commit ratio (lower aggression → more random
-	// noise per step).
-	WumpusHuntBayesian WumpusHuntMode = iota
-	// WumpusHuntWander — random walk lightly attracted by agent
-	// scent. Even at full aggressiveness this stays exploratory
-	// (50% scent-bias / 50% random at max).
-	WumpusHuntWander
-	// WumpusHuntCrowd — swarm hunting. Every crowd-hunt wumpus
-	// shares its detections (alive agents within DetectionRadius)
-	// and converges on the nearest one in the union.
-	WumpusHuntCrowd
-)
-
-// WumpusHuntModeCount is the number of distinct hunt modes; used by
-// the spawn code to pick uniformly.
-const WumpusHuntModeCount = 3
-
 // SwarmClonesPerLeader is the number of clone entities spawned
 // alongside each swarm leader. Total swarm size on spawn = 1 leader
 // + 10 clones = 11 entities.
@@ -561,10 +484,10 @@ type SwarmClone struct {
 const SwarmStrategyLetter rune = 'S'
 
 // QmdpSwarmStrategyLetter is retained as a named handle for the QMDP
-// swarm ('X'). Every non-benchmark strategy is now a swarm (see
+// swarm ('V'). Every non-benchmark strategy is now a swarm (see
 // IsSwarmStrategy), so this is no longer a special case — it's kept
 // for the rare call site that wants to name the QMDP letter directly.
-const QmdpSwarmStrategyLetter rune = 'X'
+const QmdpSwarmStrategyLetter rune = 'V'
 
 // IsSwarmStrategy reports whether a strategy letter spawns a
 // knowledge-sharing, branch-spreading clone swarm. EVERY real
@@ -601,75 +524,21 @@ const (
 // they'd never actually sense the trail and the trustee would
 // just absorb unearned penalties at journey end.
 //
-//	U scent-follower — yes (planner reads ScentOwner / ScentFreshness)
-//	V dqn            — yes (cardinal scent features in DqnInput)
-//	W pomcp          — yes (scent weighting in rollouts)
-//	X qmdp           — yes (ScentSignedFreshness in utility score)
+//	U pomcp          — yes (scent weighting in rollouts)
+//	V qmdp           — yes (ScentSignedFreshness in utility score)
 //	R / S / T        — no (BFS / swarm-Bayesian / Bayesian, scent-blind)
 func StrategyUsesScent(letter rune) bool {
 	switch letter {
-	case 'U', 'V', 'W', 'X':
+	case 'U', 'V':
 		return true
 	}
 	return false
 }
 
-// WumpusHuntModeDescription returns a short (≤64 char) human-
-// readable description of a wumpus hunt mode. Used by the TUI's
-// Wumpus Strategies legend.
-func WumpusHuntModeDescription(mode WumpusHuntMode) string {
-	switch mode {
-	case WumpusHuntBayesian:
-		return "Inductive Bayesian smell-tracking; aggressiveness gates commit"
-	case WumpusHuntWander:
-		return "Random walk lightly biased by agent scent"
-	case WumpusHuntCrowd:
-		return "Swarm hunting: shared sightings, BFS to nearest detected agent"
-	}
-	return "unknown"
-}
-
-// ActiveWumpusModes returns the set of WumpusHuntMode values
-// currently in use by at least one alive wumpus, in spawn order
-// and deduplicated. The TUI's Wumpus Strategies legend lists only
-// these — modes whose wumpus all died (or were never spawned)
-// don't render.
-func (w *World) ActiveWumpusModes() []WumpusHuntMode {
-	seen := map[WumpusHuntMode]bool{}
-	out := make([]WumpusHuntMode, 0, WumpusHuntModeCount)
-	for _, wm := range w.Wumpus {
-		if !wm.Alive || seen[wm.HuntMode] {
-			continue
-		}
-		seen[wm.HuntMode] = true
-		out = append(out, wm.HuntMode)
-	}
-	return out
-}
-
-// WumpusModeCount returns the number of currently-alive wumpus
-// using the given hunt mode. Surfaced by the TUI's Wumpus
-// Strategies legend so each row can show "<count>  <description>".
-func (w *World) WumpusModeCount(mode WumpusHuntMode) int {
-	n := 0
-	for _, wm := range w.Wumpus {
-		if wm.Alive && wm.HuntMode == mode {
-			n++
-		}
-	}
-	return n
-}
-
-// WumpusDetectionRadius bounds how close a crowd-hunt wumpus must
-// be to an alive agent to add that agent to the shared sighting
-// pool. Manhattan distance. 5 cells = roughly "around the corner."
-const WumpusDetectionRadius = 5
-
 // Stats are world-wide counters.
 type Stats struct {
 	OptimalDistance int
 	ShortestPaths   int
-	WumpusDied      int
 }
 
 // MaxShortestPathsCount: clamp the path counter so a branchy maze
@@ -685,9 +554,6 @@ type World struct {
 	// display (status bar / logs) and for tests that need to surface
 	// it without poking the internal *rand.Rand.
 	Seed int64
-
-	Heat   [BoardHeight][BoardWidth]bool
-	Stench [BoardHeight][BoardWidth]bool
 
 	// ScentOwner[y][x]: label of the most recent agent to walk this
 	// cell, 0 = unscented. ScentCycle[y][x]: World.Cycle at deposit
@@ -714,31 +580,12 @@ type World struct {
 	// the TUI's Strategy Performance table.
 	StrategyPerf map[rune]*StrategyPerfCounts
 
-	AgentAt  [BoardHeight][BoardWidth]*Agent
-	WumpusAt [BoardHeight][BoardWidth]*Wumpus
+	AgentAt [BoardHeight][BoardWidth]*Agent
 
 	Agents []*Agent
-	Wumpus []*Wumpus
 
 	GameOver bool
 	Stats    Stats
-
-	// WumpusDisabled, when true, freezes all wumpus behavior: they
-	// don't move, fight, or emit stench, and the TUI hides them.
-	// Toggled at runtime by the 'w' key. Default false.
-	WumpusDisabled bool
-
-	// FirePitsDisabled, when true, makes fire pits inert: agents may
-	// walk over them without dying, heat sensors read clean, and the
-	// TUI hides them. Toggled at runtime by the 'f' key (which also
-	// flips WaterPitsDisabled). Default false.
-	FirePitsDisabled bool
-
-	// WaterPitsDisabled, when true, makes water pits inert: agents
-	// can't collect water from them, strategies don't treat them as
-	// secondary goals, and the TUI hides them. Flipped together with
-	// FirePitsDisabled by the 'f' key. Default false.
-	WaterPitsDisabled bool
 
 	// TTLDisabled, when true, suppresses the time-to-live death rule
 	// that kills an agent once its current-attempt distance exceeds
@@ -759,19 +606,16 @@ type World struct {
 	// by agents, not pre-cached by the world.)
 	DistFromStart [BoardHeight][BoardWidth]int
 
-	nextAgentID       int
-	nextWumpusID      int
+	nextAgentID int
 
 	// nextSwarmGroupID is the per-world monotonic counter for
 	// issuing independent swarm IDs. Bumped each time an agent
 	// commits to strategy S without an existing SwarmGroupID. IDs
 	// are unique per world (reset to 0 on construction).
 	nextSwarmGroupID int
-	Rng               *rand.Rand
-	wumpusStrategyFn  func(*rand.Rand) WumpusStrategy // factory for new wumpus
-	vengeanceStrategy WumpusStrategy
+	Rng              *rand.Rand
 	// strategyForLetter dispatches per-journey strategy by letter
-	// (R/S/T/U/V/W/X). Plumbed in from Config.StrategyForLetter so
+	// (R/S/T/U/V). Plumbed in from Config.StrategyForLetter so
 	// the world package never imports strategy/.
 	strategyForLetter func(rune) Strategy
 	// strategyLetters is the canonical list of available strategy
@@ -800,18 +644,10 @@ const MinAcceptablePaths = 3
 // per-journey runtime now dispatches via StrategyForLetter and the
 // agent's CurrentStrategy.
 //
-// StrategyForLetter: letter (R/S/T/U/V/W/X) → Strategy. Used at every
+// StrategyForLetter: letter (R/S/T/U/V) → Strategy. Used at every
 // per-tick action step to dispatch the agent's currently-picked
 // strategy. Required when agents are allowed to switch strategies
 // at runtime (which is the default).
-//
-// WumpusStrategy: factory called for each new wumpus. If nil, wumpus
-// are constructed with nil Strategy and do not move.
-//
-// VengeanceStrategy: temporary strategy used while a wumpus's
-// VengeanceCycles counter is positive (pack vengeance after a sibling
-// kill). If nil, MoveWumpus falls back to the wumpus's native
-// Strategy during vengeance.
 type Config struct {
 	Seed              int64
 	StrategyFor       func(rune) Strategy
@@ -825,8 +661,6 @@ type Config struct {
 	// char) description for a strategy letter — surfaced by the
 	// TUI's Agent-Algorithm Trust legend.
 	StrategyDescriptionForLetter func(rune) string
-	WumpusStrategy               func(*rand.Rand) WumpusStrategy
-	VengeanceStrategy            WumpusStrategy
 }
 
 // NewWorld is the convenience entry point: builds a world from a seed
@@ -842,23 +676,13 @@ func NewWorldWithConfig(cfg Config) *World {
 	w := &World{
 		Seed:                         cfg.Seed,
 		Rng:                          rand.New(rand.NewSource(cfg.Seed)),
-		wumpusStrategyFn:             cfg.WumpusStrategy,
-		vengeanceStrategy:            cfg.VengeanceStrategy,
 		strategyForLetter:            cfg.StrategyForLetter,
 		strategyLetters:              cfg.StrategyLetters,
 		strategyDescriptionForLetter: cfg.StrategyDescriptionForLetter,
-		// Hazard toggles default to DISABLED so a freshly-
-		// constructed world is friendly to RL convergence.
-		// Operators can re-enable each one at runtime via the
-		// 'w' / 'f' keys.
-		//
 		// TTL defaults to ENABLED so agents have a real failure
 		// signal to learn from (LearnedTTL only updates on TTL
 		// deaths). Operators can disable it with 't'.
-		WumpusDisabled:    true,
-		FirePitsDisabled:  true,
-		WaterPitsDisabled: true,
-		TTLDisabled:       false,
+		TTLDisabled: false,
 	}
 	for attempt := 0; attempt < 50; attempt++ {
 		w.Maze = GenerateMaze(w.Rng)
@@ -868,53 +692,25 @@ func NewWorldWithConfig(cfg Config) *World {
 		}
 	}
 
-	for _, p := range w.Maze.FirePits {
-		for dy := -1; dy <= 1; dy++ {
-			for dx := -1; dx <= 1; dx++ {
-				if dx == 0 && dy == 0 {
-					continue
-				}
-				nx, ny := p.X+dx, p.Y+dy
-				if nx < 0 || nx >= BoardWidth || ny < 0 || ny >= BoardHeight {
-					continue
-				}
-				if w.Maze.Cells[ny][nx] != CellWall {
-					w.Heat[ny][nx] = true
-				}
-			}
-		}
-	}
-
-	numWumpus := 5 + w.Rng.Intn(8)
-	for i := 0; i < numWumpus; i++ {
-		p := w.RandomWumpusSpawn()
-		wm := &Wumpus{ID: w.nextWumpusID, Pos: p, Alive: true, Strategy: w.newWumpusStrategy(), Aggressiveness: w.Rng.Intn(WumpusAggressionMax + 1), HuntMode: WumpusHuntMode(w.Rng.Intn(WumpusHuntModeCount))}
-		w.nextWumpusID++
-		w.Wumpus = append(w.Wumpus, wm)
-		w.WumpusAt[p.Y][p.X] = wm
-	}
-
 	stratFor := cfg.StrategyFor
 	if stratFor == nil {
 		stratFor = func(rune) Strategy { return nil }
 	}
 	// Per-journey strategy switching means EVERY agent can run ANY
 	// algorithm, so every agent gets the union of state slots needed
-	// by any strategy: AgentBeliefs (Bayesian / scent-follower /
-	// POMCP / QMDP) and DQN (deep Q-network). DQN weights take ~1KB
-	// per agent — negligible at 12 agents.
-	labels := []rune{'1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C'}
-	// All twelve agents spawn simultaneously on the first tick. The
+	// by any strategy: AgentBeliefs (Bayesian / swarm-Bayesian /
+	// POMCP / QMDP).
+	labels := []rune{'1', '2', '3', '4', '5', '6'}
+	// All six agents spawn simultaneously on the first tick. The
 	// per-agent perimeter entrances (assigned below) already
 	// distribute them across the maze, so we no longer stagger
 	// arrivals — there's no visual clumping at one door to avoid.
 	w.Agents = make([]*Agent, 0, len(labels))
 	for _, l := range labels {
 		a := newAgent(&w.nextAgentID, l, stratFor(l), NewAgentBeliefs(), 1)
-		a.DQN = NewDQN(w.Rng)
 		w.Agents = append(w.Agents, a)
 	}
-	// All twelve agents start enabled — the user toggles individual
+	// All six agents start enabled — the user toggles individual
 	// agents off (or back on) via their label key.
 	for _, a := range w.Agents {
 		a.Disabled = false
@@ -922,9 +718,7 @@ func NewWorldWithConfig(cfg Config) *World {
 	// Uniform perception: every agent smells in a Moore radius of
 	// DefaultSmellRadius (2 cells, wall-blocked) and sees in a
 	// 4-connected radius of DefaultSightRadius (10 cells, wall-
-	// blocked). Far-sight labels 8/9/A/B/C used to receive a
-	// boosted SensingRadius=2; that distinction is gone — perception
-	// is uniform across the roster.
+	// blocked) across the roster.
 	for _, a := range w.Agents {
 		a.SmellRadius = DefaultSmellRadius
 		a.SightRadius = DefaultSightRadius
@@ -937,7 +731,7 @@ func NewWorldWithConfig(cfg Config) *World {
 	// Per-agent entry assignment: pick distinct perimeter cells (one
 	// per agent) and carve each into the maze with a guaranteed path
 	// to the goal. Falls back to the canonical Maze.EntrancePos for
-	// every agent if the picker can't satisfy 12 distinct entries
+	// every agent if the picker can't satisfy 6 distinct entries
 	// (extremely rare; the perimeter is ~400 cells).
 	entries := w.pickAgentEntrances(len(w.Agents))
 	// One goal-rooted Dijkstra here serves every per-agent OptimalDistance
@@ -958,7 +752,7 @@ func NewWorldWithConfig(cfg Config) *World {
 	w.Stats.ShortestPaths = w.CountShortestPaths(w.Maze.EntrancePos, w.Maze.GoalPos, MaxShortestPathsCount)
 	// ShortestPathCells is the union of every agent's individual
 	// entrance→goal path. The TUI 's' overlay highlights this set,
-	// so the user sees all 12 agents' shortest routes simultaneously.
+	// so the user sees all 6 agents' shortest routes simultaneously.
 	w.ShortestPathCells = map[Pos]bool{}
 	for _, a := range w.Agents {
 		for p := range a.ShortestPath {
@@ -966,11 +760,6 @@ func NewWorldWithConfig(cfg Config) *World {
 		}
 	}
 	w.computeDistFromStart()
-	// Permanently strip any entity whose toggle is currently disabled.
-	// With the default config (everything disabled) this leaves a
-	// hazard-free board; tests that need entities re-spawn them via
-	// EnableHazards.
-	w.ApplyToggles()
 	// First event in the rolling log is a random pick from the
 	// startingMessages pool — surfaces a friendly cue in the TUI
 	// before any death/goal happens. Yellow (neutral) so it reads
@@ -1461,15 +1250,6 @@ func octile(a, b Pos) int {
 	return CardinalStepCost*dy + (DiagonalStepCost-CardinalStepCost)*dx
 }
 
-// newWumpusStrategy returns a Strategy for a freshly-spawned wumpus
-// using the world's configured factory, or nil if no factory was set.
-func (w *World) newWumpusStrategy() WumpusStrategy {
-	if w.wumpusStrategyFn == nil {
-		return nil
-	}
-	return w.wumpusStrategyFn(w.Rng)
-}
-
 // ShortestPathSet returns the set of cells on ONE Dijkstra-minimum-
 // cost path from `from` to `to`. When from == to, returns the
 // singleton {from}. Empty set when no path exists.
@@ -1538,7 +1318,7 @@ func newAgent(idCounter *int, label rune, strat Strategy, beliefs *AgentBeliefs,
 		Strategy:  strat,
 		Beliefs:   beliefs,
 		RespawnIn: initialRespawnIn,
-		Disabled:  true, // agents default to disabled; user enables via '1'..'5'
+		Disabled:  true, // agents default to disabled; user enables via '1'..'6'
 	}
 	*idCounter++
 	return a
@@ -1557,27 +1337,6 @@ func (w *World) ShortestPathLength(from, to Pos) int {
 	return len(path)
 }
 
-// RandomWumpusSpawn returns an unoccupied walkable cell at least 20
-// Manhattan units from the entrance.
-func (w *World) RandomWumpusSpawn() Pos {
-	for {
-		x := w.Rng.Intn(BoardWidth)
-		y := w.Rng.Intn(BoardHeight)
-		c := w.Maze.Cells[y][x]
-		if c == CellWall || c == CellGoal || c == CellEntrance || c == CellFirePit {
-			continue
-		}
-		p := Pos{x, y}
-		if w.WumpusAt[y][x] != nil {
-			continue
-		}
-		if AbsInt(p.X-w.Maze.EntrancePos.X)+AbsInt(p.Y-w.Maze.EntrancePos.Y) < 20 {
-			continue
-		}
-		return p
-	}
-}
-
 // Step advances the simulation by one tick.
 func (w *World) Step() {
 	if w.GameOver {
@@ -1585,20 +1344,7 @@ func (w *World) Step() {
 	}
 	w.Cycle++
 	w.tickAgentClocks()
-	if !w.WumpusDisabled {
-		w.TickWumpusClocks()
-	}
-	w.RecomputeStench()
-	if !w.WumpusDisabled {
-		w.ResolveCombat()
-	}
 	w.MoveAgents()
-	if !w.WumpusDisabled {
-		w.MoveWumpus()
-		w.ResolveCombat()
-	}
-	w.ResolvePitDeaths()
-	w.CollectWater()
 	w.CheckGoal()
 	w.RespawnAgents()
 }
@@ -1610,138 +1356,6 @@ func (w *World) tickAgentClocks() {
 		}
 		if a.Alive {
 			a.TicksAlive++
-		}
-	}
-}
-
-// TickWumpusClocks bumps CyclesSinceKill for each live wumpus and
-// teleports any that reach WumpusKillTimeout. Reset to 0 happens in
-// ResolveCombat on a successful agent kill OR whenever the wumpus is
-// standing on an agent's scent trail.
-func (w *World) TickWumpusClocks() {
-	for _, wm := range w.Wumpus {
-		if !wm.Alive {
-			continue
-		}
-		if w.ScentOwner[wm.Pos.Y][wm.Pos.X] != 0 {
-			wm.CyclesSinceKill = 0
-			continue
-		}
-		wm.CyclesSinceKill++
-		if wm.CyclesSinceKill >= WumpusKillTimeout {
-			w.RelocateWumpus(wm)
-		}
-	}
-}
-
-// RelocateWumpus moves a live wumpus to a random walkable, unoccupied
-// cell and resets its boredom timer.
-func (w *World) RelocateWumpus(wm *Wumpus) {
-	for i := 0; i < 100; i++ {
-		x := w.Rng.Intn(BoardWidth)
-		y := w.Rng.Intn(BoardHeight)
-		if w.Maze.Cells[y][x] != CellPath {
-			continue
-		}
-		if w.WumpusAt[y][x] != nil || w.AgentAt[y][x] != nil {
-			continue
-		}
-		w.WumpusAt[wm.Pos.Y][wm.Pos.X] = nil
-		wm.Pos = Pos{x, y}
-		w.WumpusAt[y][x] = wm
-		wm.CyclesSinceKill = 0
-		return
-	}
-}
-
-// ResolveCombat: every adjacent agent/wumpus pair flips a coin; the
-// loser dies. Wumpus-vs-wumpus combat resolves similarly with 30% chance.
-func (w *World) ResolveCombat() {
-	for _, a := range w.Agents {
-		if a.Disabled || !a.Alive {
-			continue
-		}
-		for _, d := range Cardinals {
-			nx, ny := a.Pos.X+d.X, a.Pos.Y+d.Y
-			if !InBounds(nx, ny) {
-				continue
-			}
-			wm := w.WumpusAt[ny][nx]
-			if wm == nil || !wm.Alive {
-				continue
-			}
-			if w.Rng.Float64() < 0.5 {
-				w.KillWumpus(wm)
-				a.Stats.WumpusKilled++
-				w.recordAgentWumpusKill(a)
-			} else {
-				w.KillAgent(a, "wumpus")
-				wm.CyclesSinceKill = 0
-				break
-			}
-		}
-	}
-	// Wumpus-vs-clone combat: clones can kill or be killed just
-	// like agents. A clone kill credits the leader (Stats.WumpusKilled++).
-	for _, leader := range w.Agents {
-		if !leader.Alive || leader.Disabled || leader.SwarmGroupID == 0 {
-			continue
-		}
-		for _, c := range leader.SwarmClones {
-			if c == nil || !c.Alive {
-				continue
-			}
-			for _, d := range Cardinals {
-				nx, ny := c.Pos.X+d.X, c.Pos.Y+d.Y
-				if !InBounds(nx, ny) {
-					continue
-				}
-				wm := w.WumpusAt[ny][nx]
-				if wm == nil || !wm.Alive {
-					continue
-				}
-				if w.Rng.Float64() < 0.5 {
-					w.KillWumpus(wm)
-					leader.Stats.WumpusKilled++
-					w.recordAgentWumpusKill(leader)
-				} else {
-					c.Alive = false
-					wm.CyclesSinceKill = 0
-					break
-				}
-			}
-		}
-	}
-	seen := map[[2]int]bool{}
-	for _, w1 := range w.Wumpus {
-		if !w1.Alive {
-			continue
-		}
-		for _, d := range Cardinals {
-			nx, ny := w1.Pos.X+d.X, w1.Pos.Y+d.Y
-			if !InBounds(nx, ny) {
-				continue
-			}
-			w2 := w.WumpusAt[ny][nx]
-			if w2 == nil || !w2.Alive || w2 == w1 {
-				continue
-			}
-			a, b := w1.ID, w2.ID
-			if a > b {
-				a, b = b, a
-			}
-			key := [2]int{a, b}
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			if w.Rng.Float64() < 0.3 {
-				if w.Rng.Float64() < 0.5 {
-					w.KillWumpus(w1)
-					break
-				}
-				w.KillWumpus(w2)
-			}
 		}
 	}
 }
@@ -1780,14 +1394,6 @@ func (w *World) MoveAgents() {
 		}
 		if target == a.Pos {
 			continue
-		}
-		// Wumpus only block movement when they're an active gameplay
-		// entity. When WumpusDisabled is set they're inert — agents
-		// walk over them like empty path cells.
-		if !w.WumpusDisabled {
-			if wm := w.WumpusAt[target.Y][target.X]; wm != nil && wm.Alive {
-				continue
-			}
 		}
 		oldPos := a.Pos
 		w.AgentAt[a.Pos.Y][a.Pos.X] = nil
@@ -1904,9 +1510,8 @@ func (w *World) MoveAgents() {
 
 // CanMoveTo reports whether agent `a` could legally move to `target`
 // this tick. Same-cell is treated as NOT a valid move. Other agents
-// do NOT block — agents may overlap on the same cell. Wumpus and
-// fire-pit blocking are handled separately in MoveAgents (gated on
-// the corresponding toggle).
+// do NOT block — agents may overlap on the same cell. Walls are the
+// only blocker.
 func (w *World) CanMoveTo(a *Agent, target Pos) bool {
 	if target == a.Pos {
 		return false
@@ -1944,213 +1549,9 @@ func (w *World) FallbackMove(a *Agent) Pos {
 		if !w.CanMoveTo(a, np) {
 			continue
 		}
-		if !w.FirePitsDisabled && w.Maze.Cells[np.Y][np.X] == CellFirePit {
-			continue
-		}
-		if !w.WumpusDisabled {
-			if wm := w.WumpusAt[np.Y][np.X]; wm != nil && wm.Alive {
-				continue
-			}
-		}
-		return np
-	}
-	for _, d := range dirs {
-		np := Pos{a.Pos.X + d.X, a.Pos.Y + d.Y}
-		if !w.CanMoveTo(a, np) {
-			continue
-		}
 		return np
 	}
 	return a.Pos
-}
-
-// MoveWumpus: each wumpus invokes its assigned hunting Strategy.
-func (w *World) MoveWumpus() {
-	order := w.Rng.Perm(len(w.Wumpus))
-	for _, idx := range order {
-		wm := w.Wumpus[idx]
-		if !wm.Alive {
-			continue
-		}
-		if w.HasAdjacentLiveAgent(wm) {
-			continue
-		}
-		if wm.Strategy == nil {
-			wm.Strategy = w.newWumpusStrategy()
-		}
-		var target Pos
-		switch {
-		case wm.VengeanceCycles > 0 && w.vengeanceStrategy != nil:
-			wm.VengeanceCycles--
-			target = w.vengeanceStrategy(w, wm)
-		case wm.VengeanceCycles > 0:
-			wm.VengeanceCycles--
-			if wm.Strategy == nil {
-				continue
-			}
-			target = wm.Strategy(w, wm)
-		case wm.Strategy != nil:
-			target = wm.Strategy(w, wm)
-		default:
-			continue
-		}
-		if target == wm.Pos {
-			continue
-		}
-		if !InBounds(target.X, target.Y) || !w.Maze.IsWalkable(target) {
-			continue
-		}
-		if w.WumpusAt[target.Y][target.X] != nil {
-			continue
-		}
-		w.WumpusAt[wm.Pos.Y][wm.Pos.X] = nil
-		wm.Pos = target
-		w.WumpusAt[target.Y][target.X] = wm
-	}
-}
-
-// HasAdjacentLiveAgent reports whether any of the wumpus's 4 cardinal
-// neighbors holds a live agent.
-func (w *World) HasAdjacentLiveAgent(wm *Wumpus) bool {
-	for _, d := range Cardinals {
-		nx, ny := wm.Pos.X+d.X, wm.Pos.Y+d.Y
-		if !InBounds(nx, ny) {
-			continue
-		}
-		if a := w.AgentAt[ny][nx]; a != nil && a.Alive {
-			return true
-		}
-	}
-	return false
-}
-
-// ResolvePitDeaths: any live entity on a fire pit dies — unless an
-// agent has water charges, in which case the water is consumed AND
-// the fire pit is extinguished. When FirePitsDisabled is set, fire
-// pits are inert (no deaths, no water consumption).
-func (w *World) ResolvePitDeaths() {
-	if w.FirePitsDisabled {
-		return
-	}
-	for _, a := range w.Agents {
-		if a.Disabled || !a.Alive {
-			continue
-		}
-		if w.Maze.Cells[a.Pos.Y][a.Pos.X] != CellFirePit {
-			continue
-		}
-		if a.Water > 0 {
-			a.Water--
-			w.ExtinguishFirePit(a.Pos)
-			continue
-		}
-		w.KillAgent(a, "fire pit")
-		if w.Rng.Float64() < 0.5 {
-			w.SpawnReplacementWaterPit()
-		}
-	}
-	for _, wm := range w.Wumpus {
-		if wm.Alive && w.Maze.Cells[wm.Pos.Y][wm.Pos.X] == CellFirePit {
-			w.KillWumpus(wm)
-		}
-	}
-	// Swarm clones die on fire pits with no water-share fallback —
-	// the leader's water charge protects only the leader's own
-	// cell. Killed clones leave the swarm's count down by one.
-	for _, leader := range w.Agents {
-		if !leader.Alive || leader.Disabled || leader.SwarmGroupID == 0 {
-			continue
-		}
-		for _, c := range leader.SwarmClones {
-			if c == nil || !c.Alive {
-				continue
-			}
-			if w.Maze.Cells[c.Pos.Y][c.Pos.X] == CellFirePit {
-				c.Alive = false
-			}
-		}
-	}
-}
-
-// ExtinguishFirePit converts a fire-pit cell back into a path cell,
-// removes it from the FirePits slice, and recomputes Heat in its
-// Moore-neighborhood (a cell stays hot only if *some other* fire pit
-// still neighbours it).
-func (w *World) ExtinguishFirePit(p Pos) {
-	if w.Maze.Cells[p.Y][p.X] != CellFirePit {
-		return
-	}
-	w.Maze.Cells[p.Y][p.X] = CellPath
-	for i, fp := range w.Maze.FirePits {
-		if fp == p {
-			w.Maze.FirePits = append(w.Maze.FirePits[:i], w.Maze.FirePits[i+1:]...)
-			break
-		}
-	}
-	// Recompute Heat in the 3x3 around p — each cell stays hot iff at
-	// least one surviving fire pit is in ITS Moore-neighborhood.
-	for dy := -1; dy <= 1; dy++ {
-		for dx := -1; dx <= 1; dx++ {
-			nx, ny := p.X+dx, p.Y+dy
-			if !InBounds(nx, ny) {
-				continue
-			}
-			if w.Maze.Cells[ny][nx] == CellWall {
-				w.Heat[ny][nx] = false
-				continue
-			}
-			hot := false
-			for _, fp := range w.Maze.FirePits {
-				if AbsInt(fp.X-nx) <= 1 && AbsInt(fp.Y-ny) <= 1 && !(fp.X == nx && fp.Y == ny) {
-					hot = true
-					break
-				}
-			}
-			w.Heat[ny][nx] = hot
-		}
-	}
-}
-
-// SpawnReplacementWaterPit places a fresh water pit on a random path
-// cell at least 5 Manhattan units from the entrance.
-func (w *World) SpawnReplacementWaterPit() {
-	if w.WaterPitsDisabled {
-		return
-	}
-	for i := 0; i < 100; i++ {
-		x := w.Rng.Intn(BoardWidth)
-		y := w.Rng.Intn(BoardHeight)
-		p := Pos{x, y}
-		if w.Maze.Cells[y][x] != CellPath {
-			continue
-		}
-		if w.AgentAt[y][x] != nil || w.WumpusAt[y][x] != nil {
-			continue
-		}
-		if AbsInt(p.X-w.Maze.EntrancePos.X)+AbsInt(p.Y-w.Maze.EntrancePos.Y) < 5 {
-			continue
-		}
-		w.Maze.Cells[y][x] = CellWaterPit
-		w.Maze.WaterPits = append(w.Maze.WaterPits, p)
-		return
-	}
-}
-
-// CollectWater: agents picking up water pits consume them and gain a
-// water charge. No-op when WaterPitsDisabled is set.
-func (w *World) CollectWater() {
-	if w.WaterPitsDisabled {
-		return
-	}
-	for _, a := range w.Agents {
-		if a.Disabled || !a.Alive {
-			continue
-		}
-		if w.Maze.Cells[a.Pos.Y][a.Pos.X] == CellWaterPit {
-			w.Maze.Cells[a.Pos.Y][a.Pos.X] = CellPath
-			a.Water++
-		}
-	}
 }
 
 // MaxStartsPerMaze is a historical per-agent spawn cap. Retirement
@@ -2256,7 +1657,6 @@ func (w *World) RespawnAgents() {
 		a.Stats.OnPathSteps = 0
 		a.Stats.OffPathSteps = 0
 		a.TicksAlive = 0
-		a.Water = 0
 		a.Visited = nil
 		a.PendingBonus = 0
 		a.HasLastFrom = false
@@ -2362,42 +1762,8 @@ func (w *World) EnforceSwarmQuorum() {
 	// Intentional no-op. See doc comment.
 }
 
-// RecomputeStench rebuilds the stench grid from current wumpus
-// positions. When WumpusDisabled is set, the grid is cleared and the
-// wumpus loop is skipped so sensors read clean.
-func (w *World) RecomputeStench() {
-	for y := 0; y < BoardHeight; y++ {
-		for x := 0; x < BoardWidth; x++ {
-			w.Stench[y][x] = false
-		}
-	}
-	if w.WumpusDisabled {
-		return
-	}
-	for _, wm := range w.Wumpus {
-		if !wm.Alive {
-			continue
-		}
-		for dy := -1; dy <= 1; dy++ {
-			for dx := -1; dx <= 1; dx++ {
-				if dx == 0 && dy == 0 {
-					continue
-				}
-				nx, ny := wm.Pos.X+dx, wm.Pos.Y+dy
-				if !InBounds(nx, ny) {
-					continue
-				}
-				if w.Maze.Cells[ny][nx] == CellWall {
-					continue
-				}
-				w.Stench[ny][nx] = true
-			}
-		}
-	}
-}
-
 // CheckGoal: when an agent reaches the goal, record solve stats,
-// bump GoalsReached, queue respawn, and spawn a fresh hazard.
+// bump GoalsReached, and queue respawn.
 func (w *World) CheckGoal() {
 	// Swarm clones reaching the goal credit their leader. We do
 	// this BEFORE the leader-position pass so a swarm can still
@@ -2490,70 +1856,6 @@ func (w *World) CheckGoal() {
 			w.AgentAt[a.Pos.Y][a.Pos.X] = nil
 		}
 		a.RespawnIn = RespawnTicks
-		w.SpawnGoalHazard()
-	}
-}
-
-// SpawnGoalHazard places a random fire pit or fresh wumpus far from
-// the entrance whenever an agent solves the maze. Skips when BOTH
-// hazard families are disabled; when only one is disabled, falls back
-// to the other.
-func (w *World) SpawnGoalHazard() {
-	if w.FirePitsDisabled && w.WumpusDisabled {
-		return
-	}
-	const maxAttempts = 200
-	for i := 0; i < maxAttempts; i++ {
-		x := w.Rng.Intn(BoardWidth)
-		y := w.Rng.Intn(BoardHeight)
-		p := Pos{x, y}
-		if w.Maze.Cells[y][x] != CellPath {
-			continue
-		}
-		if w.AgentAt[y][x] != nil || w.WumpusAt[y][x] != nil {
-			continue
-		}
-		if AbsInt(p.X-w.Maze.EntrancePos.X)+AbsInt(p.Y-w.Maze.EntrancePos.Y) < 10 {
-			continue
-		}
-		// Pick whichever hazard family is enabled. If both are, 50/50.
-		spawnFire := !w.FirePitsDisabled
-		spawnWumpus := !w.WumpusDisabled
-		switch {
-		case spawnFire && spawnWumpus:
-			spawnFire = w.Rng.Float64() < 0.5
-			spawnWumpus = !spawnFire
-		case spawnFire:
-			// only fire
-		case spawnWumpus:
-			// only wumpus
-		default:
-			return
-		}
-		if spawnFire {
-			w.Maze.Cells[y][x] = CellFirePit
-			w.Maze.FirePits = append(w.Maze.FirePits, p)
-			for dy := -1; dy <= 1; dy++ {
-				for dx := -1; dx <= 1; dx++ {
-					if dx == 0 && dy == 0 {
-						continue
-					}
-					nx, ny := x+dx, y+dy
-					if !InBounds(nx, ny) {
-						continue
-					}
-					if w.Maze.Cells[ny][nx] != CellWall {
-						w.Heat[ny][nx] = true
-					}
-				}
-			}
-		} else {
-			wm := &Wumpus{ID: w.nextWumpusID, Pos: p, Alive: true, Strategy: w.newWumpusStrategy(), Aggressiveness: w.Rng.Intn(WumpusAggressionMax + 1), HuntMode: WumpusHuntMode(w.Rng.Intn(WumpusHuntModeCount))}
-			w.nextWumpusID++
-			w.Wumpus = append(w.Wumpus, wm)
-			w.WumpusAt[y][x] = wm
-		}
-		return
 	}
 }
 
@@ -2623,249 +1925,6 @@ func (w *World) KillAgent(a *Agent, reason ...string) {
 	a.RespawnIn = RespawnTicks
 }
 
-// KillWumpus removes a wumpus, bumps WumpusDied, spawns a replacement,
-// and arms pack vengeance on every survivor.
-func (w *World) KillWumpus(wm *Wumpus) {
-	wm.Alive = false
-	if w.WumpusAt[wm.Pos.Y][wm.Pos.X] == wm {
-		w.WumpusAt[wm.Pos.Y][wm.Pos.X] = nil
-	}
-	w.Stats.WumpusDied++
-	for _, other := range w.Wumpus {
-		if other == wm || !other.Alive {
-			continue
-		}
-		other.VengeanceCycles = PackVengeanceCycles
-	}
-	w.SpawnReplacementWumpus()
-}
-
-// SpawnReplacementWumpus drops a new wumpus on a random walkable cell
-// well away from the entrance.
-func (w *World) SpawnReplacementWumpus() {
-	if w.WumpusDisabled {
-		return
-	}
-	for attempts := 0; attempts < 100; attempts++ {
-		x := w.Rng.Intn(BoardWidth)
-		y := w.Rng.Intn(BoardHeight)
-		p := Pos{x, y}
-		if w.Maze.Cells[y][x] != CellPath {
-			continue
-		}
-		if w.WumpusAt[y][x] != nil || w.AgentAt[y][x] != nil {
-			continue
-		}
-		if AbsInt(p.X-w.Maze.EntrancePos.X)+AbsInt(p.Y-w.Maze.EntrancePos.Y) < 10 {
-			continue
-		}
-		nw := &Wumpus{ID: w.nextWumpusID, Pos: p, Alive: true, Strategy: w.newWumpusStrategy(), Aggressiveness: w.Rng.Intn(WumpusAggressionMax + 1), HuntMode: WumpusHuntMode(w.Rng.Intn(WumpusHuntModeCount))}
-		w.nextWumpusID++
-		w.Wumpus = append(w.Wumpus, nw)
-		w.WumpusAt[y][x] = nw
-		return
-	}
-}
-
-// SetWumpusDisabled flips the WumpusDisabled toggle and SPAWNS or
-// CLEARS entities to match. Going from enabled → disabled removes
-// every wumpus from the board; disabled → enabled scatters a fresh
-// random population (5..12) on path cells far from the entrance,
-// using the standard RandomWumpusSpawn placement.
-func (w *World) SetWumpusDisabled(disabled bool) {
-	if disabled == w.WumpusDisabled {
-		return
-	}
-	w.WumpusDisabled = disabled
-	if disabled {
-		w.ClearWumpus()
-		return
-	}
-	w.spawnInitialWumpus()
-}
-
-// SetFirePitsDisabled is the fire-pit analog of SetWumpusDisabled.
-// Enable-edge re-carves fire pits into the existing maze rooms (the
-// same recipe as GenerateMaze) and re-seeds the surrounding Heat
-// envelope. Disable-edge converts every fire-pit cell back to path
-// and zeroes Heat.
-func (w *World) SetFirePitsDisabled(disabled bool) {
-	if disabled == w.FirePitsDisabled {
-		return
-	}
-	w.FirePitsDisabled = disabled
-	if disabled {
-		w.ClearFirePits()
-		return
-	}
-	w.spawnInitialFirePits()
-}
-
-// SetWaterPitsDisabled is the water-pit analog. Enable-edge scatters
-// 3..10 fresh water pits on random path cells.
-func (w *World) SetWaterPitsDisabled(disabled bool) {
-	if disabled == w.WaterPitsDisabled {
-		return
-	}
-	w.WaterPitsDisabled = disabled
-	if disabled {
-		w.ClearWaterPits()
-		return
-	}
-	w.spawnInitialWaterPits()
-}
-
-// spawnInitialWumpus scatters 5..12 wumpus on the board using the
-// standard RandomWumpusSpawn placement (path cells, ≥20 Manhattan
-// from the entrance, no overlap with existing wumpus). Used by
-// NewWorldWithConfig and by SetWumpusDisabled(false).
-func (w *World) spawnInitialWumpus() {
-	n := 5 + w.Rng.Intn(8)
-	for i := 0; i < n; i++ {
-		p := w.RandomWumpusSpawn()
-		wm := &Wumpus{
-			ID:             w.nextWumpusID,
-			Pos:            p,
-			Alive:          true,
-			Strategy:       w.newWumpusStrategy(),
-			Aggressiveness: w.Rng.Intn(WumpusAggressionMax + 1),
-			HuntMode:       WumpusHuntMode(w.Rng.Intn(WumpusHuntModeCount)),
-		}
-		w.nextWumpusID++
-		w.Wumpus = append(w.Wumpus, wm)
-		w.WumpusAt[p.Y][p.X] = wm
-	}
-}
-
-// spawnInitialFirePits carves fire pits inside the maze rooms (same
-// recipe as GenerateMaze) and re-seeds the Heat envelope around each.
-// Skips cells that are not currently CellPath, the entrance, or the
-// goal so we don't clobber other terrain.
-func (w *World) spawnInitialFirePits() {
-	for _, r := range w.Maze.Rooms {
-		nPits := w.Rng.Intn(3)
-		for j := 0; j < nPits; j++ {
-			x := r.X + w.Rng.Intn(r.W)
-			y := r.Y + w.Rng.Intn(r.H)
-			p := Pos{x, y}
-			if p == w.Maze.EntrancePos || p == w.Maze.GoalPos {
-				continue
-			}
-			if w.Maze.Cells[y][x] != CellPath {
-				continue
-			}
-			w.Maze.Cells[y][x] = CellFirePit
-			w.Maze.FirePits = append(w.Maze.FirePits, p)
-		}
-	}
-	for _, p := range w.Maze.FirePits {
-		for dy := -1; dy <= 1; dy++ {
-			for dx := -1; dx <= 1; dx++ {
-				if dx == 0 && dy == 0 {
-					continue
-				}
-				nx, ny := p.X+dx, p.Y+dy
-				if !InBounds(nx, ny) {
-					continue
-				}
-				if w.Maze.Cells[ny][nx] != CellWall {
-					w.Heat[ny][nx] = true
-				}
-			}
-		}
-	}
-}
-
-// spawnInitialWaterPits scatters 3..10 water pits on random path
-// cells. Uses up to 100 placement attempts per pit before giving up
-// on that particular pit.
-func (w *World) spawnInitialWaterPits() {
-	numWater := 3 + w.Rng.Intn(8)
-	for j := 0; j < numWater; j++ {
-		for attempts := 0; attempts < 100; attempts++ {
-			x := w.Rng.Intn(BoardWidth)
-			y := w.Rng.Intn(BoardHeight)
-			p := Pos{x, y}
-			if w.Maze.Cells[y][x] != CellPath {
-				continue
-			}
-			if p == w.Maze.EntrancePos || p == w.Maze.GoalPos {
-				continue
-			}
-			w.Maze.Cells[y][x] = CellWaterPit
-			w.Maze.WaterPits = append(w.Maze.WaterPits, p)
-			break
-		}
-	}
-}
-
-// ClearWumpus permanently removes every wumpus from the world: nils
-// the WumpusAt spatial index, marks each Wumpus as dead, drops the
-// Wumpus slice. After this returns there are no wumpus entities to
-// move, fight, or render. New wumpus only appear via the normal
-// spawn paths IF the WumpusDisabled flag becomes false AND something
-// (KillWumpus, SpawnGoalHazard) decides to spawn one.
-func (w *World) ClearWumpus() {
-	for _, wm := range w.Wumpus {
-		if wm.Alive {
-			w.WumpusAt[wm.Pos.Y][wm.Pos.X] = nil
-			wm.Alive = false
-		}
-	}
-	w.Wumpus = nil
-	// Stench is derived from wumpus positions — wipe it so the next
-	// RecomputeStench cycle sees zeros.
-	for y := 0; y < BoardHeight; y++ {
-		for x := 0; x < BoardWidth; x++ {
-			w.Stench[y][x] = false
-		}
-	}
-}
-
-// ClearFirePits permanently removes every fire pit from the maze:
-// converts each CellFirePit back to CellPath, empties the FirePits
-// slice, and zeroes the Heat grid (heat is fire-pit-derived).
-func (w *World) ClearFirePits() {
-	for _, p := range w.Maze.FirePits {
-		if w.Maze.Cells[p.Y][p.X] == CellFirePit {
-			w.Maze.Cells[p.Y][p.X] = CellPath
-		}
-	}
-	w.Maze.FirePits = nil
-	for y := 0; y < BoardHeight; y++ {
-		for x := 0; x < BoardWidth; x++ {
-			w.Heat[y][x] = false
-		}
-	}
-}
-
-// ClearWaterPits permanently removes every water pit: each
-// CellWaterPit becomes CellPath, the WaterPits slice empties.
-func (w *World) ClearWaterPits() {
-	for _, p := range w.Maze.WaterPits {
-		if w.Maze.Cells[p.Y][p.X] == CellWaterPit {
-			w.Maze.Cells[p.Y][p.X] = CellPath
-		}
-	}
-	w.Maze.WaterPits = nil
-}
-
-// ApplyToggles clears entities whose toggle is currently disabled.
-// Idempotent — safe to call after every toggle flip and at the end of
-// world construction. Does NOT re-spawn anything when a toggle flips
-// back to enabled.
-func (w *World) ApplyToggles() {
-	if w.WumpusDisabled {
-		w.ClearWumpus()
-	}
-	if w.FirePitsDisabled {
-		w.ClearFirePits()
-	}
-	if w.WaterPitsDisabled {
-		w.ClearWaterPits()
-	}
-}
-
 // Scent-following follower set: each follower picks a trustee per
 // journey and shapes its reward based on whether the trustee's
 // scent appears under it. The "leader" pool is the set of agents
@@ -2874,30 +1933,27 @@ func (w *World) ApplyToggles() {
 //
 // Lineup mapped to scent role:
 //
-//	Leaders:    1 (BFS), 2 (DFS), 3 (Bayesian), 8 (Bayesian+fs)
-//	Followers:  4 (scent-follower),     9 (scent-follower+fs),
-//	            5 (DQN),                A (DQN+fs),
-//	            6 (POMCP),              B (POMCP+fs),
-//	            7 (QMDP),               C (QMDP+fs)
+//	Leaders:    1 (BFS), 2 (DFS), 3 (Bayesian), 4 (swarm-Bayesian)
+//	Followers:  5 (POMCP), 6 (QMDP)
 var (
-	ScentLeaderLabels   = []rune{'1', '2', '3', '8'}
-	ScentFollowerLabels = []rune{'4', '5', '6', '7', '9', 'A', 'B', 'C'}
+	ScentLeaderLabels   = []rune{'1', '2', '3', '4'}
+	ScentFollowerLabels = []rune{'5', '6'}
 )
 
 // ScentRunsForTrustWeighting: how many initial runs the agent makes
-// uniform-random picks from {1,2,3} before switching to trust-
+// uniform-random picks from the leader set before switching to trust-
 // weighted selection. The user-facing rule: "After the first 10
 // random selections, agents will begin using their perceived trust."
 //
 // ScentRunsForPeerExpansion: after this many runs, the agent picks
-// 50/50 between trust-weighted-{1,2,3} and uniform-peer-{4..7}\self.
+// 50/50 between trust-weighted-leaders and uniform-peer-followers\self.
 const (
 	ScentRunsForTrustWeighting = 10
 	ScentRunsForPeerExpansion  = 20
 )
 
 // IsScentFollower reports whether `label` belongs to the follower
-// set (agents 4-7). Agents 1-3 are leaders, not followers.
+// set (agents 5-6). Agents 1-4 are leaders, not followers.
 func IsScentFollower(label rune) bool {
 	for _, l := range ScentFollowerLabels {
 		if l == label {
@@ -2929,20 +1985,9 @@ func ScentPeerLabels(self rune) []rune {
 const ScentShapingMagnitude = 50.0
 
 // ScentMagnitudeFor returns a per-follower multiplier on
-// ScentShapingMagnitude. Agent 5 (DQN) gets a 5× boost: its Bellman
-// update competes with RealDistanceShaping deltas that can spike
-// into the hundreds when the agent reaches a new max distance from
-// the entrance, so a plain ±50 scent signal gets drowned out. The
-// stronger multiplier gives the trusted-scent gradient enough
-// weight to actually shape the network's policy.
-//
-// Other followers (4, 6, 7) keep the 1.0 baseline — agent 4 uses
-// Q-learning (lower-magnitude updates), and 6 / 7 read scent
-// directly in their planners, not through PendingBonus.
+// ScentShapingMagnitude. Both followers (5 POMCP, 6 QMDP) read scent
+// directly in their planners, so the 1.0 baseline is sufficient.
 func ScentMagnitudeFor(label rune) float64 {
-	if label == '5' {
-		return 5.0
-	}
 	return 1.0
 }
 
@@ -2963,7 +2008,7 @@ var mooreDeltas = [8]Pos{
 //
 // Used by:
 //   - ApplyScentShaping (aggregate trustee / negative-trust signal).
-//   - ScentSignedFreshness (cell-level gate for DQN / QL features).
+//   - ScentSignedFreshness (cell-level gate for scent perception).
 //   - JourneyTrusteeContactTicks (contact bump for trust update).
 //
 // At the default radius of 2, the result contains up to 25 cells in
@@ -3012,10 +2057,8 @@ func (w *World) ScentSensedCells(a *Agent) map[Pos]bool {
 //	otherwise                      → 0
 //
 // This is the canonical "what does agent `a` smell here?" function,
-// shared by:
-//   - DQN feature vector (agent 5) — 4 cardinal-neighbor entries
-//   - Q-learning argmax bias (agent 4)
-//   - any future perception-based learner
+// shared by the scent-using planners (POMCP, QMDP) and any future
+// perception-based learner.
 //
 // Returns 0 for non-follower agents and for cells out of bounds /
 // with no fresh scent. Range: [-1, +1].
@@ -3123,7 +2166,7 @@ func (w *World) ApplyScentShaping(a *Agent) float64 {
 //   - the agent is not a scent follower (it's a leader), OR
 //   - no alive candidate is available in the eligible pool — the
 //     strategy then falls back to its non-follower algorithm
-//     (outward bias / DQN / POMCP / QMDP base behavior).
+//     (outward bias / POMCP / QMDP base behavior).
 func (a *Agent) PickTrustee(w *World, rng *rand.Rand) {
 	if !IsScentFollower(a.Label) {
 		a.CurrentTrustee = 0
@@ -3529,9 +2572,8 @@ func (w *World) optimizeKnownPath(a *Agent) {
 //   - path is shorter than 2 cells (no cache yet, or just goal)
 //   - a.Pos isn't on the cached path (the agent has drifted off
 //     and needs native re-planning)
-//   - the next cell is now unwalkable or hazardous (terrain
-//     changed since the path was cached — wumpus moved in, fire
-//     pit spawned, etc.)
+//   - the next cell is now unwalkable (terrain changed since the
+//     path was cached)
 //
 // PO strategies should consult this BEFORE running their own
 // planner so previously-proven-optimal routes get replayed.
@@ -3547,7 +2589,7 @@ func (w *World) CachedStepFor(a *Agent) (Pos, bool) {
 			return a.Pos, false
 		}
 		next := a.KnownShortestPath[i+1]
-		if !w.Maze.IsWalkable(next) || w.IsHazard(next) {
+		if !w.Maze.IsWalkable(next) {
 			return a.Pos, false
 		}
 		return next, true
@@ -3673,52 +2715,6 @@ func (w *World) MarkAgentSensed(a *Agent) {
 			queue = append(queue, node{np, cur.depth + 1})
 		}
 	}
-}
-
-// HeatAt is the canonical sensor read for fire-pit proximity. Returns
-// false whenever FirePitsDisabled is set, so agent perception, belief
-// updates, and DQN features all see a "clean" board when fire pits
-// are off — not just the TUI overlay.
-func (w *World) HeatAt(x, y int) bool {
-	if w.FirePitsDisabled {
-		return false
-	}
-	if !InBounds(x, y) {
-		return false
-	}
-	return w.Heat[y][x]
-}
-
-// StenchAt is the canonical sensor read for wumpus proximity. Returns
-// false whenever WumpusDisabled is set. RecomputeStench already clears
-// the underlying grid when wumpus are off, but this guard also covers
-// the case where the grid hasn't been recomputed yet.
-func (w *World) StenchAt(x, y int) bool {
-	if w.WumpusDisabled {
-		return false
-	}
-	if !InBounds(x, y) {
-		return false
-	}
-	return w.Stench[y][x]
-}
-
-// IsHazard: omniscient hazard check used by BFS/DFS strategies.
-// Respects the WumpusDisabled / FirePitsDisabled toggles — when a
-// hazard type is disabled it's not reported as a hazard.
-func (w *World) IsHazard(p Pos) bool {
-	if !InBounds(p.X, p.Y) {
-		return true
-	}
-	if !w.FirePitsDisabled && w.Maze.Cells[p.Y][p.X] == CellFirePit {
-		return true
-	}
-	if !w.WumpusDisabled {
-		if wm := w.WumpusAt[p.Y][p.X]; wm != nil && wm.Alive {
-			return true
-		}
-	}
-	return false
 }
 
 // AgentByLabel returns the agent matching the given letter or nil.

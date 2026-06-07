@@ -9,220 +9,6 @@ import (
 	"testing"
 )
 
-// TestSetWumpusDisabled_SpawnsOnEnable: toggle-on populates the board
-// with fresh wumpus; toggle-off removes them all.
-func TestSetWumpusDisabled_SpawnsOnEnable(t *testing.T) {
-	w := NewWorld(260)
-	// Default is disabled → no wumpus.
-	if len(w.Wumpus) != 0 {
-		t.Fatalf("precondition: expected 0 wumpus by default, got %d", len(w.Wumpus))
-	}
-	w.SetWumpusDisabled(false)
-	if len(w.Wumpus) < 5 || len(w.Wumpus) > 12 {
-		t.Errorf("after enable: wumpus count = %d, want 5..12", len(w.Wumpus))
-	}
-	for _, wm := range w.Wumpus {
-		if !wm.Alive {
-			t.Error("freshly spawned wumpus should be Alive")
-		}
-		if w.WumpusAt[wm.Pos.Y][wm.Pos.X] != wm {
-			t.Error("spatial index out of sync with wumpus list")
-		}
-	}
-	w.SetWumpusDisabled(true)
-	if len(w.Wumpus) != 0 {
-		t.Errorf("after disable: wumpus count = %d, want 0", len(w.Wumpus))
-	}
-}
-
-// TestSetFirePitsDisabled_SpawnsOnEnable: toggle-on adds fire pits to
-// rooms with the heat envelope, toggle-off strips them.
-func TestSetFirePitsDisabled_SpawnsOnEnable(t *testing.T) {
-	w := NewWorld(261)
-	if len(w.Maze.FirePits) != 0 {
-		t.Fatalf("precondition: expected 0 fire pits by default")
-	}
-	w.SetFirePitsDisabled(false)
-	if len(w.Maze.FirePits) == 0 {
-		// Sometimes rooms produce zero pits randomly; retry by re-
-		// flipping a few times to give the rng a chance.
-		for i := 0; i < 5 && len(w.Maze.FirePits) == 0; i++ {
-			w.SetFirePitsDisabled(true)
-			w.SetFirePitsDisabled(false)
-		}
-		if len(w.Maze.FirePits) == 0 {
-			t.Skip("seed/rooms produced no fire pits even after retries")
-		}
-	}
-	// Confirm each pit's cell is CellFirePit and Heat is set adjacent.
-	for _, p := range w.Maze.FirePits {
-		if w.Maze.Cells[p.Y][p.X] != CellFirePit {
-			t.Errorf("pit %v cell type = %v, want CellFirePit", p, w.Maze.Cells[p.Y][p.X])
-		}
-	}
-	w.SetFirePitsDisabled(true)
-	if len(w.Maze.FirePits) != 0 {
-		t.Errorf("after disable: fire pit count = %d, want 0", len(w.Maze.FirePits))
-	}
-	// Heat grid must be fully zero too.
-	for y := 0; y < BoardHeight; y++ {
-		for x := 0; x < BoardWidth; x++ {
-			if w.Heat[y][x] {
-				t.Fatalf("heat at (%d,%d) survived fire-pit disable", x, y)
-			}
-		}
-	}
-}
-
-// TestSetWaterPitsDisabled_SpawnsOnEnable: toggle-on scatters water
-// pits, toggle-off clears them.
-func TestSetWaterPitsDisabled_SpawnsOnEnable(t *testing.T) {
-	w := NewWorld(262)
-	if len(w.Maze.WaterPits) != 0 {
-		t.Fatalf("precondition: expected 0 water pits by default")
-	}
-	w.SetWaterPitsDisabled(false)
-	if len(w.Maze.WaterPits) < 3 || len(w.Maze.WaterPits) > 10 {
-		t.Errorf("after enable: water pit count = %d, want 3..10",
-			len(w.Maze.WaterPits))
-	}
-	w.SetWaterPitsDisabled(true)
-	if len(w.Maze.WaterPits) != 0 {
-		t.Errorf("after disable: water pit count = %d, want 0",
-			len(w.Maze.WaterPits))
-	}
-}
-
-// TestSetWumpusDisabled_NoOpWhenAlreadyMatchingState: flipping to the
-// same state is idempotent — no new wumpus spawn.
-func TestSetWumpusDisabled_NoOpWhenAlreadyMatchingState(t *testing.T) {
-	w := NewWorld(263)
-	w.SetWumpusDisabled(false)
-	first := len(w.Wumpus)
-	w.SetWumpusDisabled(false) // already false, should be no-op
-	if len(w.Wumpus) != first {
-		t.Errorf("redundant enable spawned new wumpus: %d -> %d",
-			first, len(w.Wumpus))
-	}
-}
-
-// TestWumpusDisabled_DoesNotBlockMovement: a live but disabled wumpus
-// must NOT block agent movement. Regression for the bug where agent 1
-// froze indefinitely in front of a wumpus cell when WumpusDisabled
-// was true (wumpus was inert gameplay-wise but MoveAgents still
-// refused to step onto its cell).
-func TestWumpusDisabled_DoesNotBlockMovement(t *testing.T) {
-	w := NewWorld(250)
-	// Make sure wumpus stays disabled (default for NewWorld but be
-	// explicit in case future defaults change).
-	w.WumpusDisabled = true
-	a := SpawnAgentForTest(w, '1')
-	// Park the agent at an interior path cell with a known walkable
-	// neighbor, place a (disabled-context) wumpus on that neighbor,
-	// and ask the agent's planner-free Strategy stub to walk into it.
-	w.AgentAt[a.Pos.Y][a.Pos.X] = nil
-	a.Pos = Pos{X: 40, Y: 40}
-	w.AgentAt[40][40] = a
-	w.Maze.Cells[40][40] = CellPath
-	target := Pos{X: 41, Y: 40}
-	w.Maze.Cells[target.Y][target.X] = CellPath
-	// Plant a "live" wumpus at the target cell.
-	wm := &Wumpus{ID: 999, Pos: target, Alive: true}
-	w.Wumpus = append(w.Wumpus, wm)
-	w.WumpusAt[target.Y][target.X] = wm
-	// Drive agent's move via injected strategy returning `target`.
-	a.Strategy = func(_ *World, _ *Agent) Pos { return target }
-	w.MoveAgents()
-	if a.Pos != target {
-		t.Errorf("agent stayed at %v despite wumpus-disabled; expected to walk onto %v", a.Pos, target)
-	}
-}
-
-// TestWaterShield_ExtinguishesFirePit: stepping onto a fire pit with
-// water charges consumes the charge AND removes the fire pit.
-func TestWaterShield_ExtinguishesFirePit(t *testing.T) {
-	w := NewWorld(200)
-	w.EnableHazards()
-	if len(w.Maze.FirePits) == 0 {
-		t.Skip("seed produced no fire pits")
-	}
-	a := SpawnAgentForTest(w, '1')
-	pit := w.Maze.FirePits[0]
-	w.AgentAt[a.Pos.Y][a.Pos.X] = nil
-	a.Pos = pit
-	w.AgentAt[pit.Y][pit.X] = a
-	a.Water = 1
-	pitsBefore := len(w.Maze.FirePits)
-	w.ResolvePitDeaths()
-	if !a.Alive {
-		t.Fatal("agent should survive with water")
-	}
-	if a.Water != 0 {
-		t.Errorf("water = %d after shield, want 0", a.Water)
-	}
-	if w.Maze.Cells[pit.Y][pit.X] != CellPath {
-		t.Errorf("pit cell type = %v, want CellPath", w.Maze.Cells[pit.Y][pit.X])
-	}
-	if len(w.Maze.FirePits) != pitsBefore-1 {
-		t.Errorf("FirePits = %d, want %d", len(w.Maze.FirePits), pitsBefore-1)
-	}
-}
-
-// TestExtinguishFirePit_RecomputesHeat: extinguishing a fire pit
-// clears Heat in its neighborhood UNLESS another pit also adjoins
-// the same cell.
-func TestExtinguishFirePit_RecomputesHeat(t *testing.T) {
-	w := NewWorld(201)
-	// Set up two adjacent fire pits at (40,40) and (40,42). Heat at
-	// (40,41) is contributed by both — extinguishing one should leave
-	// (40,41) hot from the other.
-	p1, p2 := Pos{40, 40}, Pos{40, 42}
-	w.Maze.Cells[p1.Y][p1.X] = CellFirePit
-	w.Maze.Cells[p2.Y][p2.X] = CellFirePit
-	w.Maze.FirePits = append(w.Maze.FirePits, p1, p2)
-	// Manually flag heat at every cell adjacent to either pit.
-	for _, p := range []Pos{p1, p2} {
-		for dy := -1; dy <= 1; dy++ {
-			for dx := -1; dx <= 1; dx++ {
-				if dx == 0 && dy == 0 {
-					continue
-				}
-				nx, ny := p.X+dx, p.Y+dy
-				if InBounds(nx, ny) && w.Maze.Cells[ny][nx] != CellWall {
-					w.Heat[ny][nx] = true
-				}
-			}
-		}
-	}
-	shared := Pos{40, 41}
-	if !w.Heat[shared.Y][shared.X] {
-		t.Fatal("test setup: shared cell should be hot")
-	}
-	w.ExtinguishFirePit(p1)
-	if w.Heat[shared.Y][shared.X] != true {
-		t.Errorf("shared cell heat = %v, want true (other pit still adjacent)",
-			w.Heat[shared.Y][shared.X])
-	}
-	// (39,39) was only adjacent to p1; after p1 is gone it should cool.
-	cool := Pos{39, 39}
-	if w.Heat[cool.Y][cool.X] {
-		t.Errorf("cell %v should be cool after p1 extinguished", cool)
-	}
-}
-
-// TestExtinguishFirePit_NoopOnNonPit: calling Extinguish on a non-pit
-// cell is a silent no-op.
-func TestExtinguishFirePit_NoopOnNonPit(t *testing.T) {
-	w := NewWorld(202)
-	p := Pos{50, 50}
-	w.Maze.Cells[p.Y][p.X] = CellPath
-	pitsBefore := len(w.Maze.FirePits)
-	w.ExtinguishFirePit(p)
-	if len(w.Maze.FirePits) != pitsBefore {
-		t.Errorf("FirePits changed by no-op")
-	}
-}
-
 // TestIsScentFollower: follower set is {4,5,6,7,9,A,B,C}; leaders
 // {1,2,3,8} are not followers.
 func TestIsScentFollower(t *testing.T) {
@@ -239,11 +25,10 @@ func TestIsScentFollower(t *testing.T) {
 }
 
 // TestAgentPerceptionDefaults: every agent is constructed with the
-// uniform default smell/sight radii. The old far-sight distinction
-// is gone — labels 8/9/A/B/C are perception-equivalent to 1-7.
+// uniform default smell/sight radii across the roster.
 func TestAgentPerceptionDefaults(t *testing.T) {
 	w := NewWorld(310)
-	for _, l := range []rune{'1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C'} {
+	for _, l := range []rune{'1', '2', '3', '4', '5', '6'} {
 		a := w.AgentByLabel(l)
 		if a == nil {
 			t.Fatalf("missing agent %c", l)
@@ -389,22 +174,21 @@ func TestMarkAgentSensed_SightWallBlocks(t *testing.T) {
 
 // TestScentPeerLabels: returns the follower set minus self.
 func TestScentPeerLabels(t *testing.T) {
-	got := ScentPeerLabels('4')
+	got := ScentPeerLabels('5')
 	if len(got) != len(ScentFollowerLabels)-1 {
 		t.Fatalf("len=%d, want %d", len(got), len(ScentFollowerLabels)-1)
 	}
 	for _, r := range got {
-		if r == '4' {
-			t.Errorf("self '4' appeared in peer list")
+		if r == '5' {
+			t.Errorf("self '5' appeared in peer list")
 		}
 	}
-	// Spot-check: peer list should include both short-sight and
-	// far-sight followers.
+	// Spot-check: peer list should include the other follower(s).
 	have := map[rune]bool{}
 	for _, r := range got {
 		have[r] = true
 	}
-	for _, l := range []rune{'5', '6', '7', '9', 'A', 'B', 'C'} {
+	for _, l := range []rune{'6'} {
 		if !have[l] {
 			t.Errorf("peer list missing %c", l)
 		}
@@ -544,10 +328,10 @@ func TestApplyScentShaping_Agent5BoostedMagnitude(t *testing.T) {
 	}
 }
 
-// TestScentMagnitudeFor_DefaultsToOne: every follower except 5 uses
-// the baseline 1.0 multiplier.
+// TestScentMagnitudeFor_DefaultsToOne: every follower uses the
+// baseline 1.0 multiplier.
 func TestScentMagnitudeFor_DefaultsToOne(t *testing.T) {
-	for _, l := range []rune{'4', '6', '7'} {
+	for _, l := range []rune{'5', '6'} {
 		if got := ScentMagnitudeFor(l); got != 1.0 {
 			t.Errorf("ScentMagnitudeFor(%c) = %v, want 1.0", l, got)
 		}
@@ -932,27 +716,6 @@ func TestCachedStepFor_ReturnsNextStep(t *testing.T) {
 	}
 	if step != (Pos{X: 7, Y: 5}) {
 		t.Errorf("step = %v, want {7, 5}", step)
-	}
-}
-
-// TestCachedStepFor_FallbackWhenHazard: when the next cell on the
-// path is now a fire pit, the consult returns false so the caller
-// falls through to its native planner.
-func TestCachedStepFor_FallbackWhenHazard(t *testing.T) {
-	w := NewWorld(803)
-	for x := 5; x <= 9; x++ {
-		w.Maze.Cells[5][x] = CellPath
-	}
-	// Place a fire pit at the next-step cell.
-	w.Maze.Cells[5][7] = CellFirePit
-	w.FirePitsDisabled = false
-	a := SpawnAgentForTest(w, '3')
-	a.Pos = Pos{X: 6, Y: 5}
-	a.KnownShortestPath = []Pos{
-		{X: 5, Y: 5}, {X: 6, Y: 5}, {X: 7, Y: 5}, {X: 8, Y: 5}, {X: 9, Y: 5},
-	}
-	if _, ok := w.CachedStepFor(a); ok {
-		t.Error("expected fallback (false) when next step is hazardous")
 	}
 }
 
@@ -1930,8 +1693,8 @@ func TestWriteStatsLog_RoundTrip(t *testing.T) {
 	if rec.Seed != 292 {
 		t.Errorf("seed = %d, want 292", rec.Seed)
 	}
-	if len(rec.Agents) != 12 {
-		t.Errorf("agent rows = %d, want 12", len(rec.Agents))
+	if len(rec.Agents) != 6 {
+		t.Errorf("agent rows = %d, want 6", len(rec.Agents))
 	}
 }
 
@@ -2113,84 +1876,6 @@ func TestPathAlignment_OnPathStepCounted(t *testing.T) {
 	}
 }
 
-// TestWumpusDisabled_FreezesAndClearsStench: enabling WumpusDisabled
-// stops wumpus from moving, attacking, and emitting stench.
-func TestWumpusDisabled_FreezesAndClearsStench(t *testing.T) {
-	w := NewWorld(220)
-	w.EnableHazards()
-	wm := w.Wumpus[0]
-	startPos := wm.Pos
-	w.WumpusDisabled = true
-	// Step a few ticks — wumpus should not move, no stench should
-	// appear anywhere on the board.
-	for i := 0; i < 5; i++ {
-		w.Step()
-	}
-	if wm.Pos != startPos {
-		t.Errorf("wumpus moved %v -> %v despite disabled", startPos, wm.Pos)
-	}
-	for y := 0; y < BoardHeight; y++ {
-		for x := 0; x < BoardWidth; x++ {
-			if w.Stench[y][x] {
-				t.Fatalf("stench at (%d,%d) despite wumpus disabled", x, y)
-			}
-		}
-	}
-}
-
-// TestWumpusDisabled_NotHazard: when disabled, wumpus cells aren't
-// reported as hazards by IsHazard.
-func TestWumpusDisabled_NotHazard(t *testing.T) {
-	w := NewWorld(221)
-	w.EnableHazards()
-	wm := w.Wumpus[0]
-	if !w.IsHazard(wm.Pos) {
-		t.Fatal("live wumpus cell should be hazard when enabled")
-	}
-	w.WumpusDisabled = true
-	if w.IsHazard(wm.Pos) {
-		t.Error("wumpus cell should NOT be hazard when disabled")
-	}
-}
-
-// TestFirePitsDisabled_NoDeaths: with fire pits off, an agent on a
-// fire-pit cell does not die.
-func TestFirePitsDisabled_NoDeaths(t *testing.T) {
-	w := NewWorld(222)
-	if len(w.Maze.FirePits) == 0 {
-		t.Skip("seed produced no fire pits")
-	}
-	a := SpawnAgentForTest(w, '1')
-	pit := w.Maze.FirePits[0]
-	w.AgentAt[a.Pos.Y][a.Pos.X] = nil
-	a.Pos = pit
-	w.AgentAt[pit.Y][pit.X] = a
-	w.FirePitsDisabled = true
-	w.ResolvePitDeaths()
-	if !a.Alive {
-		t.Error("agent on fire pit should survive when fire pits disabled")
-	}
-}
-
-// TestWaterPitsDisabled_NoCollection: CollectWater no-ops when
-// water pits are disabled.
-func TestWaterPitsDisabled_NoCollection(t *testing.T) {
-	w := NewWorld(225)
-	a := SpawnAgentForTest(w, '1')
-	w.Maze.Cells[a.Pos.Y][a.Pos.X] = CellWaterPit
-	w.WaterPitsDisabled = true
-	beforeWater := a.Water
-	beforeCell := w.Maze.Cells[a.Pos.Y][a.Pos.X]
-	w.CollectWater()
-	if a.Water != beforeWater {
-		t.Errorf("agent gained water (%d->%d) despite WaterPitsDisabled",
-			beforeWater, a.Water)
-	}
-	if w.Maze.Cells[a.Pos.Y][a.Pos.X] != beforeCell {
-		t.Errorf("water-pit cell consumed despite WaterPitsDisabled")
-	}
-}
-
 // TestTTLDisabled_AgentDoesNotDie: with TTL off, an agent that has
 // blown past 2x optimal distance still does not die from TTL.
 func TestTTLDisabled_AgentDoesNotDie(t *testing.T) {
@@ -2204,24 +1889,6 @@ func TestTTLDisabled_AgentDoesNotDie(t *testing.T) {
 	if !a.Alive {
 		t.Errorf("agent died despite TTLDisabled (last_death=%q)",
 			a.Stats.LastDeathReason)
-	}
-}
-
-// TestFirePitsDisabled_NotHazard: with fire pits off, IsHazard
-// reports fire-pit cells as walkable.
-func TestFirePitsDisabled_NotHazard(t *testing.T) {
-	w := NewWorld(223)
-	w.EnableHazards()
-	if len(w.Maze.FirePits) == 0 {
-		t.Skip("seed produced no fire pits")
-	}
-	pit := w.Maze.FirePits[0]
-	if !w.IsHazard(pit) {
-		t.Fatal("fire pit should be hazard when enabled")
-	}
-	w.FirePitsDisabled = true
-	if w.IsHazard(pit) {
-		t.Error("fire pit should NOT be hazard when disabled")
 	}
 }
 

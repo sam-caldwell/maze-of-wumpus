@@ -6,12 +6,12 @@ import (
 	"maze-of-wumpus/src/world"
 )
 
-// DFSStrategy: cached DFS plan; re-plans on hazard or empty plan.
-// Targets the nearest water pit when the agent has zero water charges.
+// DFSStrategy: cached DFS plan; re-plans on empty plan or when the
+// plan no longer ends at the target.
 func DFSStrategy(w *world.World, a *world.Agent) world.Pos {
 	target := TargetFor(w, a)
 	planEndsAtTarget := len(a.Plan) > 0 && a.Plan[len(a.Plan)-1] == target
-	if len(a.Plan) == 0 || w.IsHazard(a.Plan[0]) || !planEndsAtTarget {
+	if len(a.Plan) == 0 || !planEndsAtTarget {
 		a.Plan = DFSToward(w, a.Pos, target)
 	}
 	if len(a.Plan) == 0 {
@@ -38,8 +38,8 @@ func DFSToGoal(w *world.World, from world.Pos) []world.Pos {
 	return DFSToward(w, from, w.Maze.GoalPos)
 }
 
-// DFSToward: DFS from `from` to `to` over walkable, non-hazard cells.
-// Returns nil if unreachable.
+// DFSToward: DFS from `from` to `to` over walkable cells. Returns nil
+// if unreachable.
 func DFSToward(w *world.World, from, to world.Pos) []world.Pos {
 	if from == to {
 		return nil
@@ -65,9 +65,6 @@ func dfsHelper(w *world.World, cur, goal world.Pos, visited map[world.Pos]bool, 
 			continue
 		}
 		if visited[np] {
-			continue
-		}
-		if np != goal && w.IsHazard(np) {
 			continue
 		}
 		visited[np] = true

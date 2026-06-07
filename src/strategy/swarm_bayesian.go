@@ -16,9 +16,8 @@ import (
 // mergeSwarmKnowledge syncs `a` with every other alive agent in the
 // SAME swarm group (matching SwarmGroupID). Distinct swarms are
 // walled off — an agent on swarm A never reads cells from swarm B's
-// members. KnownCells is unioned; AgentBeliefs merges Observed and
-// SafeFromPit as unions and PitProb/WumpusProb as element-wise max
-// (cautious-bias preserves safety guarantees).
+// members. KnownCells is unioned; AgentBeliefs merges Observed as a
+// union.
 func mergeSwarmKnowledge(w *world.World, a *world.Agent) {
 	if a.KnownCells == nil {
 		a.KnownCells = map[world.Pos]bool{}
@@ -48,21 +47,6 @@ func mergeSwarmKnowledge(w *world.World, a *world.Agent) {
 		}
 		for p := range peer.Beliefs.Observed {
 			a.Beliefs.Observed[p] = true
-		}
-		for p, v := range peer.Beliefs.SafeFromPit {
-			if v {
-				a.Beliefs.SafeFromPit[p] = true
-			}
-		}
-		for p, v := range peer.Beliefs.PitProb {
-			if v > a.Beliefs.PitProb[p] {
-				a.Beliefs.PitProb[p] = v
-			}
-		}
-		for p, v := range peer.Beliefs.WumpusProb {
-			if v > a.Beliefs.WumpusProb[p] {
-				a.Beliefs.WumpusProb[p] = v
-			}
 		}
 	}
 }

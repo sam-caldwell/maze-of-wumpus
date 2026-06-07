@@ -84,9 +84,6 @@ func branchCandidates(w *world.World, a *world.Agent) []world.Pos {
 		if !w.Maze.IsWalkable(np) {
 			continue
 		}
-		if w.IsHazard(np) {
-			continue
-		}
 		if a.HasLastFrom && np == a.LastFromCell {
 			continue
 		}

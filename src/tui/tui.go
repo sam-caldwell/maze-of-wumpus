@@ -1,15 +1,16 @@
 // tui.go — bubbletea Model + renderer for Maze of Wumpus.
 //
-// Five agents (labels '1'..'5') share the board, each colored distinctly:
+// Six agents (labels '1'..'6') share the board, each colored distinctly:
 //
-//	1 — blue   (Bayesian / Wumpus-World reasoning)
-//	2 — cyan   (BFS)
-//	3 — magenta (DFS)
-//	4 — green  (Q-learning)
-//	5 — yellow (DQN)
+//	1 — blue    (BFS benchmark)
+//	2 — cyan    (DFS)
+//	3 — magenta (Bayesian)
+//	4 — green   (swarm-Bayesian)
+//	5 — yellow  (POMCP)
+//	6 — orange  (QMDP)
 //
-// Wumpus are red, fire pits are red on grey, the goal is green on
-// yellow. Heat (red bg) and stench (red ~) overlay path cells.
+// The goal is green on yellow; the entrance is cyan. Walls are grey
+// blocks, paths are dim dots.
 package tui
 
 import (
@@ -34,23 +35,9 @@ var (
 	agent3Style = lipgloss.NewStyle().Foreground(lipgloss.Color("213")).Bold(true)
 	agent4Style = lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Bold(true)
 	agent5Style = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
-	agent6Style = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true) // orange (POMDP)
-	agent7Style = lipgloss.NewStyle().Foreground(lipgloss.Color("177")).Bold(true) // pink (POMCP)
-	// Far-sight variants: distinct hues kin to their short-sight
-	// counterpart but visually unambiguous on dark terminals.
-	agent8Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("165")).Bold(true) // magenta (Bayesian+fs)
-	agent9Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Bold(true)  // mid green (scent-follower+fs)
-	agentAStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Bold(true) // bright yellow (DQN+fs)
-	agentBStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("202")).Bold(true) // red-orange (POMCP+fs)
-	agentCStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Bold(true)  // purple-violet (QMDP+fs)
-	wumpusStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
-	firePitStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Background(lipgloss.Color("240")).Bold(true)
-	waterPitStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("21")).Background(lipgloss.Color("51")).Bold(true)
+	agent6Style = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true) // orange (QMDP)
 	goalStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Background(lipgloss.Color("226")).Bold(true)
 	entranceStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true)
-	heatStyle      = lipgloss.NewStyle().Background(lipgloss.Color("88"))
-	stenchStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-	stenchOnHeat   = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Background(lipgloss.Color("88"))
 	ghostStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
 	scent1Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
 	scent2Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("51"))
@@ -58,12 +45,6 @@ var (
 	scent4Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
 	scent5Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
 	scent6Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("208"))
-	scent7Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("177"))
-	scent8Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("165"))
-	scent9Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
-	scentAStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("226"))
-	scentBStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("202"))
-	scentCStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("99"))
 	titleStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
 	statStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
 	ttlWarnStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true)
@@ -85,15 +66,6 @@ var (
 	agent4Glyph   = agent4Style.Render("4")
 	agent5Glyph   = agent5Style.Render("5")
 	agent6Glyph   = agent6Style.Render("6")
-	agent7Glyph   = agent7Style.Render("7")
-	agent8Glyph   = agent8Style.Render("8")
-	agent9Glyph   = agent9Style.Render("9")
-	agentAGlyph   = agentAStyle.Render("A")
-	agentBGlyph   = agentBStyle.Render("B")
-	agentCGlyph   = agentCStyle.Render("C")
-	wumpusGlyph   = wumpusStyle.Render("W")
-	firePitGlyph  = firePitStyle.Render("F")
-	waterPitGlyph = waterPitStyle.Render("W")
 	goalGlyph     = goalStyle.Render("G")
 	scent1Glyph   = scent1Style.Render("~")
 	scent2Glyph   = scent2Style.Render("~")
@@ -101,12 +73,6 @@ var (
 	scent4Glyph   = scent4Style.Render("~")
 	scent5Glyph   = scent5Style.Render("~")
 	scent6Glyph   = scent6Style.Render("~")
-	scent7Glyph   = scent7Style.Render("~")
-	scent8Glyph   = scent8Style.Render("~")
-	scent9Glyph   = scent9Style.Render("~")
-	scentAGlyph   = scentAStyle.Render("~")
-	scentBGlyph   = scentBStyle.Render("~")
-	scentCGlyph   = scentCStyle.Render("~")
 	entranceGlyph = entranceStyle.Render("S") // generic fallback (no per-agent claim)
 
 	// agentEntranceGlyph maps an agent label to a "white agent-rune
@@ -122,12 +88,6 @@ var (
 		'4': "199", // pink-magenta
 		'5': "46",  // bright green
 		'6': "220", // gold
-		'7': "177", // light purple
-		'8': "51",  // cyan
-		'9': "82",  // mid green
-		'A': "226", // bright yellow
-		'B': "202", // red-orange
-		'C': "99",  // purple-violet
 	}
 	agentEntranceGlyph = func() map[rune]string {
 		out := map[rune]string{}
@@ -139,10 +99,7 @@ var (
 		}
 		return out
 	}()
-	stenchGlyph   = stenchStyle.Render("~")
-	heatGlyph     = heatStyle.Render(" ")
-	stenchHeatGl  = stenchOnHeat.Render("~")
-	ghostGlyph    = ghostStyle.Render("◌")
+	ghostGlyph = ghostStyle.Render("◌")
 )
 
 type tickMsg struct{}
@@ -320,28 +277,10 @@ func (m *Model) keySwitch(s string) {
 		m.reseedPreservingLearning()
 	case "s":
 		m.ShowPath = !m.ShowPath
-	case "w":
-		// SetWumpusDisabled both flips the flag and spawns (enable edge)
-		// or clears (disable edge) the wumpus population in one shot.
-		m.World.SetWumpusDisabled(!m.World.WumpusDisabled)
-	case "f":
-		// 'f' toggles BOTH pit types together to the same state.
-		next := !m.World.FirePitsDisabled
-		m.World.SetFirePitsDisabled(next)
-		m.World.SetWaterPitsDisabled(next)
 	case "t":
 		m.World.TTLDisabled = !m.World.TTLDisabled
-	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+	case "1", "2", "3", "4", "5", "6":
 		if a := m.World.AgentByLabel(rune(s[0])); a != nil {
-			a.Disabled = !a.Disabled
-		}
-	case "a", "A", "b", "B", "c", "C":
-		// Far-sight agents 'A'/'B'/'C' — accept either case.
-		label := rune(s[0])
-		if label >= 'a' && label <= 'z' {
-			label = label - 'a' + 'A'
-		}
-		if a := m.World.AgentByLabel(label); a != nil {
 			a.Disabled = !a.Disabled
 		}
 	}
@@ -353,8 +292,8 @@ func (m *Model) keySwitch(s string) {
 const StatsDir = "build/stats"
 
 // reseedPreservingLearning constructs a fresh world via m.build and
-// grafts each agent's persistent learning state (Beliefs / QL / DQN
-// / TrustScores) from the prior world onto the new agents.
+// grafts each agent's persistent learning state (Beliefs /
+// TrustScores) from the prior world onto the new agents.
 //
 // Trust scores survive reseed (so an agent's lifetime opinion of
 // each leader/peer persists), but the run counter (Stats.Starts)
@@ -370,7 +309,7 @@ func (m *Model) reseedPreservingLearning() {
 }
 
 // reseedWorldPreservingLearning builds a fresh world and grafts each
-// agent's persistent learning state (Beliefs / DQN / TrustScores /
+// agent's persistent learning state (Beliefs / TrustScores /
 // LearnedTTL) from `prev` onto the new agents. Shared by the Model's
 // reseed path and the SimLoop's auto-reseed-on-solve so both keep
 // learning across maps identically.
@@ -384,10 +323,6 @@ func reseedWorldPreservingLearning(prev *world.World, build WorldBuilder) *world
 		newA := nw.Agents[i]
 		if oldA.Beliefs != nil {
 			newA.Beliefs = oldA.Beliefs
-		}
-		if oldA.DQN != nil {
-			newA.DQN = oldA.DQN
-			newA.DQN.HasPending = false
 		}
 		if oldA.TrustScores != nil {
 			newA.TrustScores = oldA.TrustScores
@@ -503,23 +438,14 @@ func (m Model) renderBottomPane() string {
 	if m.World.Stats.ShortestPaths >= world.MaxShortestPathsCount {
 		pathsStr = fmt.Sprintf("%d+", world.MaxShortestPathsCount)
 	}
-	wumpState := "on"
-	if m.World.WumpusDisabled {
-		wumpState = "OFF"
-	}
-	pitState := "on"
-	if m.World.FirePitsDisabled {
-		pitState = "OFF"
-	}
 	ttlState := "on"
 	if m.World.TTLDisabled {
 		ttlState = "OFF"
 	}
 	b.WriteString(statStyle.Render(
-		fmt.Sprintf("Cycle %5d | Paths: %s | W killed: %d | wumpus:%s pits:%s ttl:%s\n[q]uit [r]eseed [s]how-path [w]umpus [f]ire/water [t]tl [↑↓←→] scroll [pgup/pgdn,⇧←→] page [1..9 a..c] agent",
+		fmt.Sprintf("Cycle %5d | Paths: %s | ttl:%s\n[q]uit [r]eseed [s]how-path [t]tl [↑↓←→] scroll [pgup/pgdn,⇧←→] page [1..9 a..c] agent",
 			m.World.Cycle,
-			pathsStr, m.World.Stats.WumpusDied,
-			wumpState, pitState, ttlState),
+			pathsStr, ttlState),
 	))
 	return b.String()
 }
@@ -688,10 +614,10 @@ func (m Model) formatAgentStats(a *world.Agent) string {
 		learnedTTL = fmt.Sprintf("%04d", a.LearnedTTL)
 	}
 	return fmt.Sprintf(
-		" %c %s str:%s s:%03d f:%s ttl:%s d:%03d k:%03d g:%03d %s %s best:%04d/%04d t[min/avg/max/last]:%04d/%07.1f/%04d/%s score:%.5f",
+		" %c %s str:%s s:%03d f:%s ttl:%s d:%03d g:%03d %s %s best:%04d/%04d t[min/avg/max/last]:%04d/%07.1f/%04d/%s score:%.5f",
 		a.Label, alive, strLetter,
 		a.Stats.Starts, following, learnedTTL,
-		a.Stats.Deaths, a.Stats.WumpusKilled, a.Stats.GoalsReached,
+		a.Stats.Deaths, a.Stats.GoalsReached,
 		distText, agentTTLText,
 		a.Stats.BestSolveDistance, a.Stats.BestSolveTime,
 		a.Stats.MinSolveTime, a.Stats.AvgSolveTime, a.Stats.MaxSolveTime, lastText,
@@ -735,7 +661,7 @@ var swarmCloneGlyph = func() map[rune]string {
 
 // cellHasSwarmClone returns the owning leader's label and true if
 // any alive swarm clone occupies cell (x, y). Linear-scan over the
-// 12 agent slots × ≤10 clones per agent — at most 120 checks per
+// 6 agent slots × ≤10 clones per agent — at most 60 checks per
 // cell. Acceptable for first-cut TUI rendering.
 func cellHasSwarmClone(w *world.World, x, y int) (rune, bool) {
 	for _, leader := range w.Agents {
@@ -769,37 +695,20 @@ func (m Model) glyphAt(w *world.World, x, y int) string {
 			return agent5Glyph
 		case '6':
 			return agent6Glyph
-		case '7':
-			return agent7Glyph
-		case '8':
-			return agent8Glyph
-		case '9':
-			return agent9Glyph
-		case 'A':
-			return agentAGlyph
-		case 'B':
-			return agentBGlyph
-		case 'C':
-			return agentCGlyph
-		}
-	}
-	if !w.WumpusDisabled {
-		if wm := w.WumpusAt[y][x]; wm != nil && wm.Alive {
-			return wumpusGlyph
 		}
 	}
 	// Swarm clones: each alive clone renders as a white "*" on the
-	// leader's color background. Layered below leader-agent and
-	// wumpus glyphs so a leader standing on a clone's tile shows
-	// the leader; layered above terrain glyphs so the swarm trail
-	// is visible against walls/path/pits.
+	// leader's color background. Layered below leader-agent glyphs so
+	// a leader standing on a clone's tile shows the leader; layered
+	// above terrain glyphs so the swarm trail is visible against
+	// walls/path.
 	if leaderLabel, ok := cellHasSwarmClone(w, x, y); ok {
 		if g := swarmCloneGlyph[leaderLabel]; g != "" {
 			return g
 		}
 	}
 	// Branch-animation ghosts (red) overlay everything below this
-	// point, so the agent and wumpus glyphs above still win.
+	// point, so the agent glyphs above still win.
 	if cellIsGhost(w, x, y) {
 		return ghostGlyph
 	}
@@ -807,16 +716,6 @@ func (m Model) glyphAt(w *world.World, x, y int) string {
 	switch cell {
 	case world.CellWall:
 		return wallGlyph
-	case world.CellFirePit:
-		if w.FirePitsDisabled {
-			return pathGlyph
-		}
-		return firePitGlyph
-	case world.CellWaterPit:
-		if w.WaterPitsDisabled {
-			return pathGlyph
-		}
-		return waterPitGlyph
 	case world.CellGoal:
 		return goalGlyph
 	case world.CellEntrance:
@@ -833,15 +732,7 @@ func (m Model) glyphAt(w *world.World, x, y int) string {
 		}
 		return entranceGlyph
 	}
-	heat := w.HeatAt(x, y)
-	stench := w.StenchAt(x, y)
 	switch {
-	case heat && stench:
-		return stenchHeatGl
-	case heat:
-		return heatGlyph
-	case stench:
-		return stenchGlyph
 	case w.ScentOwner[y][x] != 0:
 		switch w.ScentOwner[y][x] {
 		case '1':
@@ -856,18 +747,6 @@ func (m Model) glyphAt(w *world.World, x, y int) string {
 			return scent5Glyph
 		case '6':
 			return scent6Glyph
-		case '7':
-			return scent7Glyph
-		case '8':
-			return scent8Glyph
-		case '9':
-			return scent9Glyph
-		case 'A':
-			return scentAGlyph
-		case 'B':
-			return scentBGlyph
-		case 'C':
-			return scentCGlyph
 		}
 		return pathGlyph
 	default:

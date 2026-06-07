@@ -1,19 +1,23 @@
-// bfs.go — agent B: omniscient breadth-first search to goal,
-// treating fire pits and live wumpus as hazards.
+// bfs.go — agent B: omniscient breadth-first search to goal.
 package strategy
 
 import (
 	"maze-of-wumpus/src/world"
 )
 
-// BFSStrategy: cached BFS plan, re-planned when the next cached step
-// becomes a hazard. Targets the nearest water pit when the agent has
-// zero water charges and pits exist (see water.go); reverts to goal-
-// seeking once a charge is picked up.
+// TargetFor returns the current planning target for `a`: the maze
+// goal. Hazards and water pits no longer exist, so the target is
+// always the goal. Kept for the B (BFS) and C (DFS) call sites.
+func TargetFor(w *world.World, a *world.Agent) world.Pos {
+	return w.Maze.GoalPos
+}
+
+// BFSStrategy: cached BFS plan, re-planned when the plan empties or
+// no longer ends at the target.
 func BFSStrategy(w *world.World, a *world.Agent) world.Pos {
 	target := TargetFor(w, a)
 	planEndsAtTarget := len(a.Plan) > 0 && a.Plan[len(a.Plan)-1] == target
-	if len(a.Plan) == 0 || w.IsHazard(a.Plan[0]) || !planEndsAtTarget {
+	if len(a.Plan) == 0 || !planEndsAtTarget {
 		a.Plan = BFSToward(w, a.Pos, target)
 	}
 	if len(a.Plan) == 0 {
@@ -37,9 +41,20 @@ func BFSStrategy(w *world.World, a *world.Agent) world.Pos {
 	return next
 }
 
-// BFSToGoal returns a hazard-avoiding BFS path from `from` to the
-// world's goal cell. Empty slice if no path exists. Kept as a stable
-// public entry point; equivalent to BFSToward(w, from, w.Maze.GoalPos).
+// BFSToGoal returns a BFS path from `from` to the world's goal cell.
+// Empty slice if no path exists. Kept as a stable public entry point;
+// equivalent to BFSToward(w, from, w.Maze.GoalPos).
 func BFSToGoal(w *world.World, from world.Pos) []world.Pos {
 	return BFSToward(w, from, w.Maze.GoalPos)
+}
+
+// BFSToward returns a shortest path from `from` to `to` over the full
+// (omniscient) walkable graph. Walls are the only blocker. Backed by
+// A* with octile heuristic on the 10/14-weighted 8-conn grid. "BFS"
+// is kept in the name for historical continuity at the call sites.
+func BFSToward(w *world.World, from, to world.Pos) []world.Pos {
+	if from == to {
+		return nil
+	}
+	return w.AStarPath(from, to, w.Maze.IsWalkable)
 }

@@ -5,8 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
-
 	"maze-of-wumpus/src/world"
 )
 
@@ -81,25 +79,6 @@ func TestFormatAgentStats_Dead(t *testing.T) {
 	out := m.formatAgentStats(a)
 	if !strings.Contains(out, "dead") {
 		t.Errorf("missing 'dead' for dead agent: %s", out)
-	}
-}
-
-// TestUpdate_FarSightAgentToggleKey covers the a/A/b/B/c/C branch.
-func TestUpdate_FarSightAgentToggleKey(t *testing.T) {
-	m := NewModel(105, world.NewWorld)
-	a := m.World.AgentByLabel('A')
-	before := a.Disabled
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
-	m = next.(Model)
-	if a.Disabled == before {
-		t.Errorf("'a' key did not toggle agent A")
-	}
-	// Upper-case form should work too.
-	beforeB := m.World.AgentByLabel('B').Disabled
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("B")})
-	m = next.(Model)
-	if m.World.AgentByLabel('B').Disabled == beforeB {
-		t.Errorf("'B' key did not toggle agent B")
 	}
 }
 

@@ -14,7 +14,6 @@
 //     pocket.
 //  3. The entrance is placed in the top-left path cell, the goal in the
 //     bottom-right.
-//  4. Fire pits are sprinkled into rooms (a few per maze).
 package world
 
 import (
@@ -22,7 +21,7 @@ import (
 )
 
 // CellType categorizes every grid cell. Walls block movement; paths are
-// walkable; entrance/goal/firepit are walkable cells with special meaning.
+// walkable; entrance/goal are walkable cells with special meaning.
 type CellType uint8
 
 const (
@@ -30,8 +29,6 @@ const (
 	CellPath
 	CellEntrance
 	CellGoal
-	CellFirePit
-	CellWaterPit
 )
 
 const (
@@ -66,19 +63,15 @@ type Pos struct {
 }
 
 // Maze holds the generated terrain. It's immutable after GenerateMaze
-// returns; entity positions and dynamic state (heat/stench) live in
-// World, not here.
+// returns; entity positions live in World, not here.
 type Maze struct {
 	Cells       [BoardHeight][BoardWidth]CellType
 	EntrancePos Pos
 	GoalPos     Pos
-	FirePits    []Pos
-	WaterPits   []Pos
 	Rooms       []Room
 }
 
-// Room is a rectangular open area carved into the maze. Recorded so the
-// game can place fire pits inside them.
+// Room is a rectangular open area carved into the maze.
 type Room struct {
 	X, Y, W, H int
 }
@@ -98,7 +91,7 @@ const OpenFieldProbability = 0.20
 // (perimeter walls, fully-open interior, entrance at (1,1), goal at
 // the diametrically opposite interior corner). Otherwise a standard
 // recursive-backtracker maze is carved from (0,0). Either way the
-// downstream room / fire-pit / water-pit population runs.
+// downstream room population runs.
 func GenerateMaze(rng *rand.Rand) *Maze {
 	m := &Maze{}
 	for y := 0; y < BoardHeight; y++ {
@@ -164,39 +157,6 @@ func GenerateMaze(rng *rand.Rand) *Maze {
 	m.GoalPos = pickRandomGoal(m, m.EntrancePos, rng)
 	m.Cells[m.GoalPos.Y][m.GoalPos.X] = CellGoal
 
-	for _, r := range m.Rooms {
-		nPits := rng.Intn(3)
-		for j := 0; j < nPits; j++ {
-			x := r.X + rng.Intn(r.W)
-			y := r.Y + rng.Intn(r.H)
-			p := Pos{x, y}
-			if p == m.EntrancePos || p == m.GoalPos {
-				continue
-			}
-			if m.Cells[y][x] != CellPath {
-				continue
-			}
-			m.Cells[y][x] = CellFirePit
-			m.FirePits = append(m.FirePits, p)
-		}
-	}
-	numWater := 3 + rng.Intn(8)
-	for j := 0; j < numWater; j++ {
-		for attempts := 0; attempts < 100; attempts++ {
-			x := rng.Intn(BoardWidth)
-			y := rng.Intn(BoardHeight)
-			p := Pos{x, y}
-			if m.Cells[y][x] != CellPath {
-				continue
-			}
-			if p == m.EntrancePos || p == m.GoalPos {
-				continue
-			}
-			m.Cells[y][x] = CellWaterPit
-			m.WaterPits = append(m.WaterPits, p)
-			break
-		}
-	}
 	return m
 }
 
@@ -305,8 +265,7 @@ func absInt(x int) int {
 }
 
 // IsWalkable reports whether an entity may step onto (or through) the
-// given cell. Walls block; fire pits don't block movement per se —
-// stepping onto one is the death event resolved by World.Step.
+// given cell. Walls block; every other cell is walkable.
 func (m *Maze) IsWalkable(p Pos) bool {
 	if p.X < 0 || p.X >= BoardWidth || p.Y < 0 || p.Y >= BoardHeight {
 		return false

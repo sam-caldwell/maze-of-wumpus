@@ -8,24 +8,20 @@
 //	Q(b, a) ≈ Σ_s b(s) Q_MDP(s, a)
 //
 // In our setting the agent KNOWS its position (no positional
-// uncertainty) but is uncertain about hazards. The belief is
-// captured by AgentBeliefs.PitProb and WumpusProb. So
-// b(s, hazards) collapses to a delta over position, with hazard
-// uncertainty integrated out per-cell via safety = (1 − PitProb) ×
-// (1 − WumpusProb).
+// uncertainty) and, with hazards removed, the underlying MDP is a
+// pure navigation problem. The belief therefore collapses to a delta
+// over position.
 //
 // Per-action utility at the agent's current cell:
 //
-//	Q(a) = safety(s') × (
-//	           qmdpExploreWeight × DistFromStart(s')
-//	         + qmdpScentWeight   × ScentSignedFreshness(s')
-//	       )
+//	Q(a) = qmdpExploreWeight × DistFromStart(s')
+//	     + qmdpScentWeight   × ScentSignedFreshness(s')
 //
-// where s' is the cell reached by action a. Safety folds in the
-// hazard belief; the explore term is the strict-PO outward bias
-// (the only spatial signal the agent legitimately holds); the
-// scent term integrates the trustee gradient (positive for trustee,
-// negative for negative-trust labels — the dynamic repel).
+// where s' is the cell reached by action a. The explore term is the
+// strict-PO outward bias (the only spatial signal the agent
+// legitimately holds); the scent term integrates the trustee gradient
+// (positive for trustee, negative for negative-trust labels — the
+// dynamic repel).
 //
 // This is QMDP-style in spirit rather than a full POMDP solve: we
 // don't backpropagate value updates across belief transitions.
@@ -46,8 +42,8 @@ const (
 )
 
 // QMDPStrategy returns the next cell by QMDP-style expected-value
-// argmax over the 4 cardinal actions, using AgentBeliefs for hazard
-// uncertainty and scent perception for trustee guidance.
+// argmax over the 4 cardinal actions, using the outward-bias explore
+// term and scent perception for trustee guidance.
 //
 // Applies the per-agent graph prune to a.KnownCells before scoring.
 // QMDP is a one-step argmax — it doesn't multi-step plan — so the
@@ -79,18 +75,12 @@ func qmdpStrategyPlan(w *world.World, a *world.Agent) world.Pos {
 		if !knownWalkable(w, a, np) {
 			continue
 		}
-		var pitP, wumpP float64
-		if a.Beliefs != nil {
-			pitP = a.Beliefs.PitProb[np]
-			wumpP = a.Beliefs.WumpusProb[np]
-		}
-		safety := (1 - pitP) * (1 - wumpP)
 		explore := float64(0)
 		if d := a.DistFromStart[np.Y][np.X]; d > 0 {
 			explore = float64(d)
 		}
 		scent := w.ScentSignedFreshness(a, np.X, np.Y)
-		score := safety * (qmdpExploreWeight*explore + qmdpScentWeight*scent)
+		score := qmdpExploreWeight*explore + qmdpScentWeight*scent
 		// Swarm dispersion: repel from nearby swarm-mates while
 		// exploring (no-op solo / once goal perceived).
 		score -= qmdpRepelWeight * swarmDispersionPenalty(w, a, np)
@@ -101,6 +91,25 @@ func qmdpStrategyPlan(w *world.World, a *world.Agent) world.Pos {
 	}
 	if best == a.Pos {
 		return outwardBiasNeighbor(w, a)
+	}
+	return best
+}
+
+// outwardBiasNeighbor picks the walkable cardinal neighbor with the
+// highest DistFromStart. Used as the fallback when no useful signal
+// applies.
+func outwardBiasNeighbor(w *world.World, a *world.Agent) world.Pos {
+	best := a.Pos
+	bestDist := -1
+	for _, d := range world.Cardinals {
+		np := world.Pos{X: a.Pos.X + d.X, Y: a.Pos.Y + d.Y}
+		if !knownWalkable(w, a, np) {
+			continue
+		}
+		if df := a.DistFromStart[np.Y][np.X]; df > bestDist {
+			bestDist = df
+			best = np
+		}
 	}
 	return best
 }

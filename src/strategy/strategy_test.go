@@ -1,7 +1,6 @@
 package strategy
 
 import (
-	"math/rand"
 	"testing"
 
 	"maze-of-wumpus/src/world"
@@ -85,8 +84,8 @@ func TestSwarmBayesian_IgnoresNonSwarmPeers(t *testing.T) {
 // human-readable NameByLetter entry, and ForLetter('Z') returns
 // nil for unrecognized input.
 func TestStrategyLetters_RegistryComplete(t *testing.T) {
-	if len(StrategyLetters) != 7 {
-		t.Fatalf("StrategyLetters len = %d, want 7", len(StrategyLetters))
+	if len(StrategyLetters) != 5 {
+		t.Fatalf("StrategyLetters len = %d, want 5", len(StrategyLetters))
 	}
 	for _, l := range StrategyLetters {
 		if ForLetter(l) == nil {
@@ -105,7 +104,7 @@ func TestStrategyLetters_RegistryComplete(t *testing.T) {
 }
 
 func TestForLabel_All(t *testing.T) {
-	for _, label := range []rune{'1', '2', '3', '4', '5', '6', '7'} {
+	for _, label := range []rune{'1', '2', '3', '4', '5', '6'} {
 		if ForLabel(label) == nil {
 			t.Errorf("ForLabel(%c) = nil", label)
 		}
@@ -120,10 +119,9 @@ func TestName_All(t *testing.T) {
 		'1': "bfs",
 		'2': "dfs",
 		'3': "bayesian",
-		'4': "scent-follower",
-		'5': "dqn",
-		'6': "pomcp",
-		'7': "qmdp",
+		'4': "swarm-bayesian",
+		'5': "pomcp",
+		'6': "qmdp",
 		'Z': "unknown",
 	}
 	for label, expected := range want {
@@ -140,30 +138,16 @@ func TestBFS_SameCell(t *testing.T) {
 	}
 }
 
-// killAllWumpus removes all wumpus so BFS/DFS pathfinding tests have
-// a guaranteed entrance-to-goal route.
-func killAllWumpus(w *world.World) {
-	for _, wm := range w.Wumpus {
-		if wm.Alive {
-			w.WumpusAt[wm.Pos.Y][wm.Pos.X] = nil
-			wm.Alive = false
-		}
-	}
-}
-
 // TestBFSStrategy_AllBranches exercises:
 //   - initial plan empty → plans and returns first step
 //   - cached plan → returns next step without replanning
 //   - plan empty after BFS returns nil (agent already at goal) → returns a.Pos
-//   - hazard on cached step → replans
 func TestBFSStrategy_AllBranches(t *testing.T) {
 	w := newConfiguredWorld(170)
-	killAllWumpus(w)
 	a := world.SpawnAgentForTest(w, '2')
-	a.Water = 1 // suppress the water-secondary-goal override
 	_ = BFSStrategy(w, a)
 	if len(a.Plan) == 0 {
-		t.Fatal("expected BFS to compute a non-empty plan with no wumpus blocking")
+		t.Fatal("expected BFS to compute a non-empty plan")
 	}
 	// First call may have triggered the branch-decision animation
 	// (entrance at (1,0) has multiple walkable neighbors). Step
@@ -177,22 +161,15 @@ func TestBFSStrategy_AllBranches(t *testing.T) {
 	if got := BFSStrategy(w, a); got != a.Pos {
 		t.Errorf("at-goal BFS = %v, want %v", got, a.Pos)
 	}
-	a.Pos = w.Maze.EntrancePos
-	hazard := world.Pos{X: 70, Y: 40}
-	w.Maze.Cells[hazard.Y][hazard.X] = world.CellFirePit
-	a.Plan = []world.Pos{hazard}
-	_ = BFSStrategy(w, a)
 }
 
 // TestDFSStrategy_AllBranches mirrors TestBFSStrategy_AllBranches.
 func TestDFSStrategy_AllBranches(t *testing.T) {
 	w := newConfiguredWorld(171)
-	killAllWumpus(w)
 	a := world.SpawnAgentForTest(w, '3')
-	a.Water = 1
 	_ = DFSStrategy(w, a)
 	if len(a.Plan) == 0 {
-		t.Fatal("expected DFS to compute a non-empty plan with no wumpus blocking")
+		t.Fatal("expected DFS to compute a non-empty plan")
 	}
 	a.SearchAnim = nil
 	if len(a.Plan) > 0 {
@@ -203,11 +180,6 @@ func TestDFSStrategy_AllBranches(t *testing.T) {
 	if got := DFSStrategy(w, a); got != a.Pos {
 		t.Errorf("at-goal DFS = %v, want %v", got, a.Pos)
 	}
-	a.Pos = w.Maze.EntrancePos
-	hazard := world.Pos{X: 70, Y: 40}
-	w.Maze.Cells[hazard.Y][hazard.X] = world.CellFirePit
-	a.Plan = []world.Pos{hazard}
-	_ = DFSStrategy(w, a)
 }
 
 // TestBFSToGoal_Unreachable: box off the start cell so BFS exhausts
@@ -242,9 +214,9 @@ func TestDFSToGoal_NoPath(t *testing.T) {
 func TestWWCellOK_StrictAndLoose(t *testing.T) {
 	w := newConfiguredWorld(51)
 	a := w.AgentByLabel('3') // Bayesian (renumbered from '1')
-	// Seed KnownCells for every cell under test — wwCellOK now gates
-	// on perception, so cells must be in the agent's seen set for the
-	// belief predicate to even matter.
+	// With hazards removed, wwCellOK/wwCellOKLoose gate purely on
+	// perception + walkability: a perceived, walkable cell is OK; an
+	// out-of-bounds, walled, or unperceived cell is not.
 	if a.KnownCells == nil {
 		a.KnownCells = map[world.Pos]bool{}
 	}
@@ -257,64 +229,24 @@ func TestWWCellOK_StrictAndLoose(t *testing.T) {
 		t.Error("OOB cell must not be OK loose either")
 	}
 
-	pit := world.Pos{X: 5, Y: 5}
-	known(pit)
-	a.Beliefs.PitProb[pit] = 1.0
-	if wwCellOK(w, a, pit) {
-		t.Error("known pit must not be OK")
-	}
-	if wwCellOKLoose(w, a, pit) {
-		t.Error("known pit must not be OK loose")
-	}
-
+	// A perceived, walkable cell is enterable under both predicates.
 	v := world.Pos{X: 10, Y: 10}
 	known(v)
 	a.Beliefs.Observed[v] = true
 	w.Maze.Cells[v.Y][v.X] = world.CellPath
 	if !wwCellOK(w, a, v) {
-		t.Error("visited cell must be OK")
+		t.Error("perceived walkable cell must be OK")
+	}
+	if !wwCellOKLoose(w, a, v) {
+		t.Error("perceived walkable cell must be OK loose")
 	}
 
-	st := world.Pos{X: 20, Y: 20}
-	known(st)
-	w.Maze.Cells[st.Y][st.X] = world.CellPath
-	a.Beliefs.WumpusProb[st] = 1.0
-	if wwCellOK(w, a, st) {
-		t.Error("current-stench cell must not be OK")
-	}
-	if wwCellOKLoose(w, a, st) {
-		t.Error("current-stench cell must not be OK loose")
-	}
-
-	u := world.Pos{X: 30, Y: 30}
-	known(u)
-	w.Maze.Cells[u.Y][u.X] = world.CellPath
-	if wwCellOK(w, a, u) {
-		t.Error("unobserved+unsafe cell must not be strictly OK")
-	}
-	if !wwCellOKLoose(w, a, u) {
-		t.Error("unobserved cell must be loosely OK")
-	}
-
-	// Nil-beliefs path: agent 2 has no AgentBeliefs. Seed its
-	// KnownCells with (0,0) so the perception gate passes and we
-	// test the actual nil-beliefs branch of the predicate.
-	b := w.AgentByLabel('2')
-	b.KnownCells = map[world.Pos]bool{{X: 0, Y: 0}: true}
-	if wwCellOK(w, b, world.Pos{X: 0, Y: 0}) {
-		t.Error("nil-beliefs strict must be false")
-	}
-	if !wwCellOKLoose(w, b, world.Pos{X: 0, Y: 0}) {
-		t.Error("nil-beliefs loose must be true for a walkable cell")
-	}
-
-	// Partial-observability gate: an unseen cell rejects from both
-	// predicates regardless of belief state.
+	// Partial-observability gate: an unseen (unperceived) cell rejects
+	// from both predicates even though it's walkable.
 	unseen := world.Pos{X: 60, Y: 60}
 	w.Maze.Cells[unseen.Y][unseen.X] = world.CellPath
-	a.Beliefs.SafeFromPit[unseen] = true
 	if wwCellOK(w, a, unseen) {
-		t.Error("unseen cell must not be OK regardless of SafeFromPit")
+		t.Error("unseen cell must not be OK")
 	}
 	if wwCellOKLoose(w, a, unseen) {
 		t.Error("unseen cell must not be OK loose either")
@@ -335,10 +267,6 @@ func TestWWNearestSafeFrontier_FindsBoundaryCell(t *testing.T) {
 	a.SightRadius = 1 // tight perception so a boundary is reachable
 	w.MarkAgentSensed(a)
 	a.Beliefs.Observed[a.Pos] = true
-	a.Beliefs.SafeFromPit[a.Pos] = true
-	for p := range a.KnownCells {
-		a.Beliefs.SafeFromPit[p] = true
-	}
 	got, ok := wwNearestSafeFrontier(w, a)
 	if !ok {
 		t.Fatal("expected a safe perception-boundary cell")
@@ -439,12 +367,7 @@ func TestWWPlanPath_AllStages(t *testing.T) {
 	a.Pos = w.Maze.EntrancePos
 	_ = wwPlanPath(w, a)
 	a.Beliefs.Observed[a.Pos] = true
-	for _, d := range world.Cardinals {
-		np := world.Pos{X: a.Pos.X + d.X, Y: a.Pos.Y + d.Y}
-		if w.Maze.IsWalkable(np) {
-			a.Beliefs.SafeFromPit[np] = true
-		}
-	}
+	w.MarkAgentSensed(a)
 	_ = wwPlanPath(w, a)
 }
 
@@ -452,31 +375,6 @@ func TestUpdateBeliefs_OOBSkip(t *testing.T) {
 	w := newConfiguredWorld(96)
 	a := world.SpawnAgentForTest(w, '3')
 	UpdateAgentBeliefs(w, a)
-}
-
-func TestUpdateBeliefs_HeatBranches(t *testing.T) {
-	w := newConfiguredWorld(86)
-	w.EnableHazards()
-	a := world.SpawnAgentForTest(w, '3')
-	w.AgentAt[a.Pos.Y][a.Pos.X] = nil
-	a.Pos = world.Pos{X: 40, Y: 40}
-	w.AgentAt[40][40] = a
-	w.Heat[40][40] = true
-	w.Stench[40][40] = true
-	UpdateAgentBeliefs(w, a)
-	if len(a.Beliefs.PitProb) == 0 {
-		t.Error("multi-candidate heat branch should populate PitProb")
-	}
-	if len(a.Beliefs.WumpusProb) == 0 {
-		t.Error("stench branch should populate WumpusProb")
-	}
-	for _, d := range []world.Pos{{X: 0, Y: -1}, {X: 0, Y: 1}, {X: -1, Y: 0}, {X: 1, Y: 0}, {X: -1, Y: -1}, {X: 1, Y: -1}, {X: -1, Y: 1}} {
-		a.Beliefs.SafeFromPit[world.Pos{X: 40 + d.X, Y: 40 + d.Y}] = true
-	}
-	UpdateAgentBeliefs(w, a)
-	if a.Beliefs.PitProb[world.Pos{X: 41, Y: 41}] != 1.0 {
-		t.Errorf("single-candidate pit = %v, want 1.0", a.Beliefs.PitProb[world.Pos{X: 41, Y: 41}])
-	}
 }
 
 func TestBayesianStrategy_NilBeliefsInitializes(t *testing.T) {
@@ -505,112 +403,5 @@ func TestBayesianStrategy_NoPath(t *testing.T) {
 	a.Plan = nil
 	if got := BayesianStrategy(w, a); got != a.Pos {
 		t.Errorf("walled-in bayesian = %v, want %v", got, a.Pos)
-	}
-}
-
-func TestDQN_NilDQNInitializes(t *testing.T) {
-	w := newConfiguredWorld(92)
-	a := world.SpawnAgentForTest(w, '5')
-	a.DQN = nil
-	_ = DQNStrategy(w, a)
-	if a.DQN == nil {
-		t.Error("DQNStrategy should allocate a DQN on nil")
-	}
-}
-
-func TestDQN_PersistsAcrossDeaths(t *testing.T) {
-	w := newConfiguredWorld(78)
-	e := w.AgentByLabel('5')
-	e.DQN.W1[0] = 12345.0
-	a := world.SpawnAgentForTest(w, '5')
-	w.KillAgent(a, "wumpus")
-	for i := 0; i < 30; i++ {
-		w.Step()
-		if a.Alive {
-			break
-		}
-	}
-	if e.DQN.W1[0] != 12345.0 {
-		t.Errorf("DQN weight did not persist across respawn: %v", e.DQN.W1[0])
-	}
-}
-
-func TestDQN_AppliesUpdate(t *testing.T) {
-	w := newConfiguredWorld(79)
-	a := world.SpawnAgentForTest(w, '5')
-	before := make([]float64, len(a.DQN.W2))
-	copy(before, a.DQN.W2)
-	_ = DQNStrategy(w, a)
-	a.Stats.Deaths++
-	_ = DQNStrategy(w, a)
-	changed := false
-	for i, v := range a.DQN.W2 {
-		if v != before[i] {
-			changed = true
-			break
-		}
-	}
-	if !changed {
-		t.Error("DQN W2 weights did not change after a Bellman update")
-	}
-}
-
-func TestDQN_FeaturesIncludeHazards(t *testing.T) {
-	w := newConfiguredWorld(81)
-	w.EnableHazards()
-	a := world.SpawnAgentForTest(w, '5')
-	w.Heat[a.Pos.Y][a.Pos.X] = true
-	w.Stench[a.Pos.Y][a.Pos.X] = true
-	f := world.AgentDqnFeatures(w, a)
-	if f[4] != 1 || f[5] != 1 {
-		t.Errorf("heat/stench features = %v %v, want 1/1", f[4], f[5])
-	}
-}
-
-func TestDQN_GoalReward(t *testing.T) {
-	w := newConfiguredWorld(82)
-	a := world.SpawnAgentForTest(w, '5')
-	_ = DQNStrategy(w, a)
-	a.Stats.GoalsReached++
-	_ = DQNStrategy(w, a)
-}
-
-func TestDQN_WaterAndKillRewards(t *testing.T) {
-	w := newConfiguredWorld(83)
-	a := world.SpawnAgentForTest(w, '5')
-	_ = DQNStrategy(w, a)
-	a.Water++
-	a.Stats.WumpusKilled++
-	_ = DQNStrategy(w, a)
-}
-
-func TestDQN_UpdateNoOpWhenTargetMatches(t *testing.T) {
-	d := world.NewDQN(rand.New(rand.NewSource(1)))
-	in := make([]float64, world.DqnInput)
-	_, out := d.Forward(in)
-	before := make([]float64, len(d.W1))
-	copy(before, d.W1)
-	d.Update(in, 0, out[0], DqnLearnRate)
-	for i, v := range d.W1 {
-		if v != before[i] {
-			t.Errorf("W1[%d] changed despite zero-delta update", i)
-		}
-	}
-}
-
-func TestDQN_ForwardSanity(t *testing.T) {
-	d := world.NewDQN(rand.New(rand.NewSource(1)))
-	in := make([]float64, world.DqnInput)
-	for i := range in {
-		in[i] = float64(i) * 0.1
-	}
-	_, out := d.Forward(in)
-	if len(out) != world.DqnOutput {
-		t.Errorf("forward output dim = %d, want %d", len(out), world.DqnOutput)
-	}
-	for _, v := range out {
-		if v != v {
-			t.Error("forward produced NaN")
-		}
 	}
 }

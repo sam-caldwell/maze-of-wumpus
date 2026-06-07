@@ -95,10 +95,6 @@ func planFor(letter rune) world.Strategy {
 	switch letter {
 	case StrategySwarmBayesian, StrategyBayesian:
 		return BayesianStrategy
-	case StrategyScentFollower:
-		return ScentFollowerStrategy
-	case StrategyDQN:
-		return DQNStrategy
 	case StrategyPOMCP:
 		return POMCPStrategy
 	case StrategyQMDP:
@@ -153,16 +149,8 @@ func moveOneSwarmMember(w *world.World, a *world.Agent, c *world.SwarmClone, pla
 
 	moved := false
 	if target != c.Pos && w.CanMoveTo(a, target) { // a.Pos == c.Pos here
-		blocked := false
-		if !w.WumpusDisabled {
-			if wm := w.WumpusAt[target.Y][target.X]; wm != nil && wm.Alive {
-				blocked = true
-			}
-		}
-		if !blocked {
-			c.Pos = target
-			moved = true
-		}
+		c.Pos = target
+		moved = true
 	}
 
 	// Sense from the clone's new cell so the SHARED KnownCells grows in

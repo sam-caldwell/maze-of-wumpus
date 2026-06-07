@@ -84,41 +84,6 @@ var startingMessages = []string{
 // War Games, Office Space, and Silicon Valley alongside the
 // original snark, so the rolling Events panel reads like a meme
 // channel commenting on agent fortunes.
-var deathByWumpus = []string{
-	// Originals.
-	"Agent %c killed by Wumpus",
-	"Wumpus had Agent %c for lunch. Tasty",
-	"Agent %c bumped into a Wumpus. Hard",
-	"Agent %c: brave, foolish, dead. Wumpus says thanks",
-	"Wumpus 1, Agent %c 0",
-	"Agent %c: Were gonna need a bigger boat",
-	// Office Space.
-	"Yeah, if Agent %c could not have died, that'd be great. Mmkay",
-	"Did Agent %c get the memo? Wumpus did",
-	"Sounds like Agent %c has a case of the Mondays",
-	"Agent %c put the cover sheet on the TPS report. Still eaten",
-	// War Games.
-	"A strange game. The only winning move was to dodge. Agent %c didn't",
-	"GREETINGS PROFESSOR. Agent %c just got declassified by Wumpus",
-	// Silicon Valley.
-	"Always be closing. Wumpus closed Agent %c",
-	"Agent %c's runway ended. Wumpus had the lease",
-	// Shakespeare.
-	"Et tu, Wumpus? Agent %c is fallen",
-	"Out, out, brief candle. Agent %c is no more",
-	"Agent %c shuffled off this mortal coil",
-	// Dostoyevsky.
-	"Agent %c's Grand Inquisitor wore Wumpus fur",
-	"Pain and suffering are always inevitable. Ask Agent %c",
-	// Bradbury.
-	"Something wicked this way came. Agent %c blinked",
-	// Kafka.
-	"Agent %c woke up transformed. Into deceased",
-	// Dr. Strangelove.
-	"Agent %c gave the Wumpus an attack profile. Wumpus accepted",
-	"Agent %c: 'we'll meet again' — said the Wumpus",
-}
-
 var deathByTTL = []string{
 	// Originals.
 	"Agent %c died of TTL",
@@ -165,28 +130,6 @@ var deathByTTL = []string{
 	"Agent %c suffered, therefore was. Now isn't",
 }
 
-var deathByFire = []string{
-	// Originals.
-	"Agent %c fell into a fire pit",
-	"Agent %c walked into a pit. Bottomless",
-	"Agent %c walked into a pit. BBQ",
-	"Agent %c discovered gravity. The hard way",
-	"Agent %c's last words: 'is that smoke?'",
-	// Office Space.
-	"Agent %c took the printer outside. Forgot the pit",
-	// War Games.
-	"How about a nice game of fire? Agent %c said yes",
-	// Silicon Valley.
-	"Agent %c achieved middle-out compression. Into a pit",
-	// Bradbury.
-	"Agent %c learned what burns at 451°F. Everything",
-	"The salamander chose Agent %c",
-	// Shakespeare.
-	"Out, brief candle! Agent %c was the candle",
-	// Dr. Strangelove.
-	"Agent %c rode the bomb. The bomb was a fire pit",
-}
-
 var deathByOther = []string{
 	// Originals.
 	"Agent %c died (%s)",
@@ -200,30 +143,6 @@ var deathByOther = []string{
 	"Agent %c shuffled off this mortal coil (%s)",
 	// Kafka.
 	"Agent %c never reached the castle (%s)",
-}
-
-// wumpusKilled fires when an agent wins a combat exchange against
-// a Wumpus. Rendered yellow — it's a positive moment but not a
-// goal reach, and yellow keeps it visually distinct from the
-// green goal events.
-var wumpusKilled = []string{
-	"Agent %c killed a Wumpus",
-	"Agent %c: I love the smell of dead wumpus in the morning!",
-	"Agent %c notched a Wumpus pelt",
-	"Agent %c bagged a Wumpus. The rug awaits",
-	"One less Wumpus thanks to Agent %c",
-	"Agent %c struck first. Wumpus regrets every life choice",
-	"Agent %c: 'this is for my pack'",
-	"Wumpus down. Agent %c collects bounty",
-	"Agent %c: No fighting in the war room, Wumpus.",
-	"Agent %c: Wumpus, you'll have to answer to the coca cola company.",
-}
-
-// recordAgentWumpusKill formats a wumpus-kill event using a snark
-// template. Called from MoveAgents whenever an agent wins a combat
-// exchange.
-func (w *World) recordAgentWumpusKill(a *Agent) {
-	w.RecordEvent("yellow", fmt.Sprintf(w.pickTemplate(wumpusKilled), a.Label))
 }
 
 var goalReached = []string{
@@ -274,12 +193,8 @@ func (w *World) pickTemplate(pool []string) string {
 // snark template. Called from KillAgent.
 func (w *World) recordAgentDeath(a *Agent, reason string) {
 	switch reason {
-	case "wumpus":
-		w.RecordEvent("red", fmt.Sprintf(w.pickTemplate(deathByWumpus), a.Label))
 	case "ttl":
 		w.RecordEvent("red", fmt.Sprintf(w.pickTemplate(deathByTTL), a.Label))
-	case "firepit", "fire-pit", "fire":
-		w.RecordEvent("red", fmt.Sprintf(w.pickTemplate(deathByFire), a.Label))
 	default:
 		w.RecordEvent("red", fmt.Sprintf(w.pickTemplate(deathByOther), a.Label, reason))
 	}

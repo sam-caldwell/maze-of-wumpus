@@ -13,7 +13,7 @@ import (
 	"maze-of-wumpus/src/world"
 )
 
-// spawnMarginFrac: for the score-based policies (QMDP/POMCP/DQN), a
+// spawnMarginFrac: for the score-based policies (QMDP/POMCP), a
 // branch is forked when its score is within this fraction of the
 // best→worst score spread below the best. 0 → only ties with the
 // best; 1 → every candidate. 0.25 forks the clearly-competitive
@@ -131,8 +131,8 @@ func swarmRegionForks(w *world.World, a *world.Agent, fullKnown map[world.Pos]bo
 // slots allow. The per-algorithm part is (a) a viability filter — never
 // send a clone into a region its beliefs deem hazardous — and (b) the
 // order in which directions are filled when slots are scarce, by the
-// algorithm's own valuation (scent for the follower, expected utility
-// for QMDP, rollout for POMCP, Q for DQN, outward distance otherwise).
+// algorithm's own valuation (expected utility for QMDP, rollout for
+// POMCP, outward distance otherwise).
 func pickRegionTargets(w *world.World, a *world.Agent, reps []world.Pos, freeSlots int) []world.Pos {
 	if freeSlots <= 0 {
 		return nil
@@ -159,14 +159,11 @@ func pickRegionTargets(w *world.World, a *world.Agent, reps []world.Pos, freeSlo
 	return out
 }
 
-// regionViable rejects a frontier direction whose gateway the agent's
-// beliefs consider hazardous — no algorithm should deploy a clone into
-// a known pit/wumpus cell.
+// regionViable reports whether a frontier direction's gateway may host
+// a clone. With hazards removed every perceived walkable gateway is
+// viable; the walkability gate lives at the call site.
 func regionViable(a *world.Agent, np world.Pos) bool {
-	if a.Beliefs == nil {
-		return true
-	}
-	return a.Beliefs.PitProb[np] < 0.5 && a.Beliefs.WumpusProb[np] == 0
+	return true
 }
 
 // regionScore ranks a frontier-direction gateway by the agent's own
@@ -174,18 +171,8 @@ func regionViable(a *world.Agent, np world.Pos) bool {
 // first. (Saturation still forks toward every viable direction when
 // slots allow; this only decides priority.)
 func regionScore(w *world.World, a *world.Agent, np world.Pos) float64 {
-	switch a.CurrentStrategy {
-	case StrategyDQN:
-		if a.DQN != nil {
-			_, out := a.DQN.Forward(world.AgentDqnFeatures(w, a))
-			if act := directionAction(a.Pos, np); act >= 0 && act < len(out) {
-				return out[act]
-			}
-		}
-	case StrategyPOMCP:
-		// Outward distance is a cheap, allocation-free proxy here;
-		// per-direction rollouts would be costly at fork time.
-	}
+	// POMCP uses outward distance as a cheap, allocation-free proxy
+	// here; per-direction rollouts would be costly at fork time.
 	// Default (QMDP and fallbacks): prefer farther-from-entrance,
 	// scent-positive gateways — the swarm's outward exploration bias.
 	explore := 0.0
@@ -279,10 +266,6 @@ func spawnPolicyFor(letter rune) spawnPolicy {
 	switch letter {
 	case StrategySwarmBayesian, StrategyBayesian:
 		return bayesianSpawnPolicy
-	case StrategyScentFollower:
-		return scentSpawnPolicy
-	case StrategyDQN:
-		return dqnSpawnPolicy
 	case StrategyPOMCP:
 		return pomcpSpawnPolicy
 	case StrategyQMDP:
@@ -291,44 +274,16 @@ func spawnPolicyFor(letter rune) spawnPolicy {
 	return qmdpSpawnPolicy
 }
 
-// bayesianSpawnPolicy forks down branches the agent's beliefs deem
-// safe (no likely pit, no possible wumpus) — Bayesian's purpose is
-// hazard-avoiding inference, so it only commits a clone to a branch it
-// believes survivable.
+// bayesianSpawnPolicy forks down branches up to the slot budget. With
+// hazards removed every perceived branch is survivable, so it simply
+// fills the available slots in branch order.
 func bayesianSpawnPolicy(w *world.World, a *world.Agent, branches []world.Pos, freeSlots int) []world.Pos {
 	var out []world.Pos
 	for _, np := range branches {
 		if len(out) >= freeSlots {
 			break
 		}
-		safe := true
-		if a.Beliefs != nil {
-			if a.Beliefs.PitProb[np] >= 0.5 || a.Beliefs.WumpusProb[np] > 0 {
-				safe = false
-			}
-		}
-		if safe {
-			out = append(out, np)
-		}
-	}
-	return out
-}
-
-// scentSpawnPolicy forks scent-bearing branches first (a chosen
-// leader's trail is worth following with a dedicated clone), then any
-// remaining branches, up to the slot budget.
-func scentSpawnPolicy(w *world.World, a *world.Agent, branches []world.Pos, freeSlots int) []world.Pos {
-	scored := make([]scoredBranch, len(branches))
-	for i, np := range branches {
-		scored[i] = scoredBranch{w.ScentSignedFreshness(a, np.X, np.Y), np}
-	}
-	sort.SliceStable(scored, func(i, j int) bool { return scored[i].score > scored[j].score })
-	out := make([]world.Pos, 0, freeSlots)
-	for _, sb := range scored {
-		if len(out) >= freeSlots {
-			break
-		}
-		out = append(out, sb.pos)
+		out = append(out, np)
 	}
 	return out
 }
@@ -339,18 +294,12 @@ func scentSpawnPolicy(w *world.World, a *world.Agent, branches []world.Pos, free
 func qmdpSpawnPolicy(w *world.World, a *world.Agent, branches []world.Pos, freeSlots int) []world.Pos {
 	scores := make([]float64, len(branches))
 	for i, np := range branches {
-		var pitP, wumpP float64
-		if a.Beliefs != nil {
-			pitP = a.Beliefs.PitProb[np]
-			wumpP = a.Beliefs.WumpusProb[np]
-		}
-		safety := (1 - pitP) * (1 - wumpP)
 		explore := 0.0
 		if d := a.DistFromStart[np.Y][np.X]; d > 0 {
 			explore = float64(d)
 		}
 		scent := w.ScentSignedFreshness(a, np.X, np.Y)
-		scores[i] = safety * (qmdpExploreWeight*explore + qmdpScentWeight*scent)
+		scores[i] = qmdpExploreWeight*explore + qmdpScentWeight*scent
 	}
 	return branchesWithinMargin(scores, branches, freeSlots)
 }
@@ -363,28 +312,6 @@ func pomcpSpawnPolicy(w *world.World, a *world.Agent, branches []world.Pos, free
 	for i, np := range branches {
 		rng := rand.New(rand.NewSource(w.Rng.Int63()))
 		scores[i] = meanRolloutReturn(w, a, np, rng)
-	}
-	return branchesWithinMargin(scores, branches, freeSlots)
-}
-
-// dqnSpawnPolicy forks branches whose learned Q-value is within margin
-// of the best — the network forks where it's unsure which move is
-// best. With no network yet, falls back to forking up to the budget.
-func dqnSpawnPolicy(w *world.World, a *world.Agent, branches []world.Pos, freeSlots int) []world.Pos {
-	if a.DQN == nil {
-		out := branches
-		if len(out) > freeSlots {
-			out = out[:freeSlots]
-		}
-		return out
-	}
-	_, out := a.DQN.Forward(world.AgentDqnFeatures(w, a))
-	scores := make([]float64, len(branches))
-	for i, np := range branches {
-		act := directionAction(a.Pos, np)
-		if act >= 0 && act < len(out) {
-			scores[i] = out[act]
-		}
 	}
 	return branchesWithinMargin(scores, branches, freeSlots)
 }

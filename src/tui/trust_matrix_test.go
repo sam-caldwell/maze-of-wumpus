@@ -64,7 +64,7 @@ func TestRenderTrustMatrix_LegendInline(t *testing.T) {
 }
 
 // TestRenderTrustMatrix_AlgorithmMatrixBelow: after the legend, a
-// spacer + "Agent-Algorithm Trust" title + algorithm header + 12
+// spacer + "Agent-Algorithm Trust" title + algorithm header + agent count
 // agent rows should appear when the world has strategy letters
 // configured.
 func TestRenderTrustMatrix_AlgorithmMatrixBelow(t *testing.T) {
@@ -73,9 +73,12 @@ func TestRenderTrustMatrix_AlgorithmMatrixBelow(t *testing.T) {
 		StrategyLetters: []rune{'R', 'S', 'T'},
 	})
 	lines := renderTrustMatrixLines(w)
-	// Layout post-legend-move: title + header + 12 agents + spacer
-	// + algorithm-trust title.
-	algoStart := 1 + 1 + len(w.Agents) + 1
+	// Layout post-legend-move: title + header + agents + extra-legend
+	// rows + spacer + algorithm-trust title. The 16-step heat legend
+	// needs 8 rows; when the roster is shorter, the leftover entries
+	// spill onto their own lines below the agent rows.
+	extra := legendSpillRows(len(w.Agents))
+	algoStart := 1 + 1 + len(w.Agents) + extra + 1
 	if len(lines) < algoStart+1+1+len(w.Agents) {
 		t.Fatalf("not enough lines for algorithm matrix: %d", len(lines))
 	}
@@ -112,7 +115,8 @@ func TestRenderTrustMatrix_AlgorithmLegend(t *testing.T) {
 	// + spacer + perf-title + perf-header + N perf-rows
 	// + spacer + "Agent Strategies" title + N algo-legend
 	algoLetterCount := 2 // R, S configured below
-	titleIdx := 1 + 1 + len(w.Agents) + 1 + 1 + 1 + len(w.Agents) + 1 + 1 + 1 + algoLetterCount + 1
+	extra := legendSpillRows(len(w.Agents))
+	titleIdx := 1 + 1 + len(w.Agents) + extra + 1 + 1 + 1 + len(w.Agents) + 1 + 1 + 1 + algoLetterCount + 1
 	legendStart := titleIdx + 1
 	if len(lines) < legendStart+2 {
 		t.Fatalf("not enough lines: %d (need ≥ %d)", len(lines), legendStart+2)
@@ -196,95 +200,6 @@ func TestRenderTrustMatrix_StrategyPerfHeatBG(t *testing.T) {
 	// S has TTL=0 → bg 232 (coldest).
 	if !strings.Contains(sRow, "\x1b[48;5;232m") {
 		t.Errorf("S row should contain bg=232 (min heat): %q", sRow)
-	}
-}
-
-// TestRenderTrustMatrix_WumpusLegend_WhenWumpusAlive: when at least
-// one wumpus is alive with each HuntMode, the Wumpus Strategies
-// legend renders the title + one row per active mode.
-func TestRenderTrustMatrix_WumpusLegend_WhenWumpusAlive(t *testing.T) {
-	w := world.NewWorldWithConfig(world.Config{
-		Seed:            7,
-		StrategyLetters: []rune{'R'},
-	})
-	w.EnableHazards()
-	// Force exactly one wumpus per mode so all 3 rows render.
-	if len(w.Wumpus) < 3 {
-		t.Skip("not enough wumpus spawned at this seed")
-	}
-	for i, mode := range []world.WumpusHuntMode{
-		world.WumpusHuntBayesian,
-		world.WumpusHuntWander,
-		world.WumpusHuntCrowd,
-	} {
-		w.Wumpus[i].HuntMode = mode
-		w.Wumpus[i].Alive = true
-	}
-	lines := renderTrustMatrixLines(w)
-	joined := strings.Join(lines, "\n")
-	if !strings.Contains(joined, "Wumpus Strategies") {
-		t.Error("output missing 'Wumpus Strategies' title")
-	}
-	for _, want := range []string{
-		"Inductive Bayesian smell-tracking",
-		"Random walk lightly biased",
-		"Swarm hunting",
-	} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("output missing wumpus description fragment %q", want)
-		}
-	}
-}
-
-// TestRenderTrustMatrix_WumpusLegend_PerModeCount: each rendered
-// row should start with the number of alive wumpus using that
-// mode. Force 2 Bayesian + 1 Crowd alive; verify the prefix.
-func TestRenderTrustMatrix_WumpusLegend_PerModeCount(t *testing.T) {
-	w := world.NewWorldWithConfig(world.Config{
-		Seed:            11,
-		StrategyLetters: []rune{'R'},
-	})
-	w.EnableHazards()
-	if len(w.Wumpus) < 3 {
-		t.Skip("not enough wumpus spawned at this seed")
-	}
-	for _, wm := range w.Wumpus {
-		wm.Alive = false
-	}
-	w.Wumpus[0].HuntMode = world.WumpusHuntBayesian
-	w.Wumpus[0].Alive = true
-	w.Wumpus[1].HuntMode = world.WumpusHuntBayesian
-	w.Wumpus[1].Alive = true
-	w.Wumpus[2].HuntMode = world.WumpusHuntCrowd
-	w.Wumpus[2].Alive = true
-	lines := renderTrustMatrixLines(w)
-	joined := strings.Join(lines, "\n")
-	// Bayesian row: "  2  Inductive..."
-	if !strings.Contains(joined, "  2  Inductive Bayesian smell-tracking") {
-		t.Errorf("expected '  2  Inductive Bayesian...' row in output")
-	}
-	// Crowd row: "  1  Swarm..."
-	if !strings.Contains(joined, "  1  Swarm hunting") {
-		t.Errorf("expected '  1  Swarm hunting...' row in output")
-	}
-	// Wander should NOT appear (no alive wander wumpus).
-	if strings.Contains(joined, "Random walk lightly") {
-		t.Errorf("Wander row should not render (no alive wander wumpus)")
-	}
-}
-
-// TestRenderTrustMatrix_WumpusLegend_NoAlive: when no wumpus is
-// alive, the legend shows a placeholder line instead of empty rows.
-func TestRenderTrustMatrix_WumpusLegend_NoAlive(t *testing.T) {
-	w := world.NewWorldWithConfig(world.Config{
-		Seed:            8,
-		StrategyLetters: []rune{'R'},
-	})
-	// World defaults: WumpusDisabled=true → no wumpus spawned at all.
-	lines := renderTrustMatrixLines(w)
-	joined := strings.Join(lines, "\n")
-	if !strings.Contains(joined, "no active wumpus") {
-		t.Errorf("expected '(no active wumpus)' placeholder somewhere in output")
 	}
 }
 

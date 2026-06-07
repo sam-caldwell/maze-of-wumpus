@@ -23,7 +23,6 @@ type MazeStatsLog struct {
 	Cycle           int              `json:"cycle"`
 	OptimalDistance int              `json:"optimal_distance"`
 	ShortestPaths   int              `json:"shortest_paths"`
-	WumpusDied      int              `json:"wumpus_died"`
 	Agents          []AgentStatsLogR `json:"agents"`
 }
 
@@ -50,7 +49,6 @@ func (w *World) WriteStatsLog(dir string) (string, error) {
 		Cycle:           w.Cycle,
 		OptimalDistance: w.Stats.OptimalDistance,
 		ShortestPaths:   w.Stats.ShortestPaths,
-		WumpusDied:      w.Stats.WumpusDied,
 	}
 	for _, a := range w.Agents {
 		rec.Agents = append(rec.Agents, AgentStatsLogR{
