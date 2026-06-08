@@ -484,7 +484,7 @@ func TestCountShortestPaths_SaturatesAtCap(t *testing.T) {
 // per-journey.
 func TestAgentStrategy_UniversalSlots(t *testing.T) {
 	w := NewWorld(99)
-	for _, l := range []rune{'1', '2', '3', '4', '5', '6'} {
+	for _, l := range []rune{'1', '2', '3', '4', '5'} {
 		a := w.AgentByLabel(l)
 		if a == nil {
 			t.Fatalf("missing agent %c", l)

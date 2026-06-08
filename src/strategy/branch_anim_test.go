@@ -116,18 +116,6 @@ func TestBranchAnim_NoAnimInCorridor(t *testing.T) {
 	}
 }
 
-// TestBranchAnim_DFSToo: agent 3 (DFS) animates at branch points too.
-func TestBranchAnim_DFSToo(t *testing.T) {
-	w, a := branchTestWorld(t, 403, '3')
-	got := DFSStrategy(w, a)
-	if got != a.Pos {
-		t.Errorf("DFS first call returned %v, want a.Pos %v", got, a.Pos)
-	}
-	if a.SearchAnim == nil {
-		t.Fatal("DFS did not initialize SearchAnim at branch point")
-	}
-}
-
 // TestBranchCandidates_ExcludesLastFromCell: when the agent has just
 // come from one direction, that direction is not a branch candidate.
 func TestBranchCandidates_ExcludesLastFromCell(t *testing.T) {

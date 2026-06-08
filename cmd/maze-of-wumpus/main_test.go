@@ -107,8 +107,8 @@ func TestWriteHeadlessState_PerAgentFields(t *testing.T) {
 	writeHeadlessState(&buf, w)
 	s := buf.String()
 	for _, want := range []string{
-		"1_alive=", "2_alive=", "3_alive=", "4_alive=", "5_alive=", "6_alive=",
-		"1_score=", "2_score=", "3_score=", "4_score=", "5_score=", "6_score=",
+		"1_alive=", "2_alive=", "3_alive=", "4_alive=", "5_alive=",
+		"1_score=", "2_score=", "3_score=", "4_score=", "5_score=",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("missing %q in output: %s", want, s)
@@ -143,7 +143,7 @@ func TestProductionRunProgram_WithStubbedTea(t *testing.T) {
 
 // TestProductionRunProgram_CallsAnnounce: runProgram fires announce()
 // before handing off to the TUI runner. The announce var is swapped
-// out so the real `say` binary is never invoked during tests.
+// out so the test can observe the call ordering.
 func TestProductionRunProgram_CallsAnnounce(t *testing.T) {
 	prevAnnounce, prevTea := announce, teaRunner
 	defer func() { announce, teaRunner = prevAnnounce, prevTea }()
@@ -172,7 +172,7 @@ func TestProductionRunProgram_CallsAnnounce(t *testing.T) {
 }
 
 // TestReseedHeadless_PreservesLearningState builds a previous-world,
-// stamps known Beliefs/DQN/TrustScores/LearnedTTL on its agents, then
+// stamps known Beliefs/TrustScores/LearnedTTL on its agents, then
 // asserts reseedHeadless carries every field forward.
 func TestReseedHeadless_PreservesLearningState(t *testing.T) {
 	prev := buildWorld(101)
@@ -254,11 +254,10 @@ func TestEnsureLogDirs(t *testing.T) {
 	ensureLogDirs() // must not panic
 }
 
-// TestAnnounceOther covers the non-darwin announce variant. On darwin,
-// announce uses `say` (mocked elsewhere); the other-OS variant is a
-// pure no-op that the test still calls for coverage credit.
+// TestAnnounce_DoesNotPanic exercises the announce hook (now a
+// cross-platform no-op) for coverage credit.
 func TestAnnounce_DoesNotPanic(t *testing.T) {
-	announce() // platform-dependent, but both variants are safe to call
+	announce()
 }
 
 // TestRunHeadless_DirectInvoke exercises the runHeadless wrapper that
@@ -277,7 +276,7 @@ func TestRunHeadless_DirectInvoke(t *testing.T) {
 
 func TestBuildWorld_AttachesStrategies(t *testing.T) {
 	w := buildWorld(7)
-	for _, label := range []rune{'1', '2', '3', '4', '5', '6'} {
+	for _, label := range []rune{'1', '2', '3', '4', '5'} {
 		a := w.AgentByLabel(label)
 		if a.Strategy == nil {
 			t.Errorf("agent %c missing strategy", label)

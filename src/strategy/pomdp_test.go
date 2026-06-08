@@ -10,7 +10,7 @@ import (
 // cardinal neighbor (or a.Pos if boxed in).
 func TestPOMCPStrategy_PicksAMove(t *testing.T) {
 	w := newConfiguredWorld(503)
-	a := world.SpawnAgentForTest(w, '6')
+	a := world.SpawnAgentForTest(w, '5')
 	if a.KnownCells == nil {
 		a.KnownCells = map[world.Pos]bool{}
 	}
@@ -39,7 +39,7 @@ func TestPOMCPStrategy_PicksAMove(t *testing.T) {
 // via outward-bias rollouts.
 func TestPOMCPStrategy_ColdStartFallbackMoves(t *testing.T) {
 	w := newConfiguredWorld(602)
-	a := world.SpawnAgentForTest(w, '6')
+	a := world.SpawnAgentForTest(w, '5')
 	got := POMCPStrategy(w, a)
 	if got == a.Pos {
 		t.Errorf("POMCPStrategy froze at game start: %v", got)
@@ -50,13 +50,13 @@ func TestPOMCPStrategy_ColdStartFallbackMoves(t *testing.T) {
 	}
 }
 
-// TestForLabel_Planners: swarm-Bayesian (4), POMCP (5) and QMDP (6)
+// TestForLabel_Planners: swarm-Bayesian (3), POMCP (4) and QMDP (5)
 // are wired with current names.
 func TestForLabel_Planners(t *testing.T) {
 	cases := map[rune]string{
-		'4': "swarm-bayesian",
-		'5': "pomcp",
-		'6': "qmdp",
+		'3': "swarm-bayesian",
+		'4': "pomcp",
+		'5': "qmdp",
 	}
 	for label, want := range cases {
 		if ForLabel(label) == nil {

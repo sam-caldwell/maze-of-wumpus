@@ -28,7 +28,7 @@ func TestIsScentFollower(t *testing.T) {
 // uniform default smell/sight radii across the roster.
 func TestAgentPerceptionDefaults(t *testing.T) {
 	w := NewWorld(310)
-	for _, l := range []rune{'1', '2', '3', '4', '5', '6'} {
+	for _, l := range []rune{'1', '2', '3', '4', '5'} {
 		a := w.AgentByLabel(l)
 		if a == nil {
 			t.Fatalf("missing agent %c", l)
@@ -188,7 +188,7 @@ func TestScentPeerLabels(t *testing.T) {
 	for _, r := range got {
 		have[r] = true
 	}
-	for _, l := range []rune{'6'} {
+	for _, l := range []rune{'4'} {
 		if !have[l] {
 			t.Errorf("peer list missing %c", l)
 		}
@@ -306,32 +306,10 @@ func TestApplyScentShaping_AggregatesAcrossSensed(t *testing.T) {
 	}
 }
 
-// TestApplyScentShaping_Agent5BoostedMagnitude: agent 5's per-step
-// scent bonus is 5× the base ScentShapingMagnitude so the DQN's
-// Bellman update actually feels the trusted-scent gradient.
-func TestApplyScentShaping_Agent5BoostedMagnitude(t *testing.T) {
-	w := NewWorld(310)
-	a := SpawnAgentForTest(w, '5')
-	a.Pos = Pos{X: 40, Y: 40}
-	w.Cycle = 50
-	w.ScentOwner[40][40] = '2'
-	w.ScentCycle[40][40] = 50 // freshness = 1.0
-	a.CurrentTrustee = '2'
-	want := ScentShapingMagnitude * ScentMagnitudeFor('5')
-	if got := w.ApplyScentShaping(a); got != want {
-		t.Errorf("agent 5 on trustee scent: %v, want %v (5× boost)",
-			got, want)
-	}
-	if ScentMagnitudeFor('5') <= 1.0 {
-		t.Errorf("ScentMagnitudeFor('5') = %v, want > 1.0",
-			ScentMagnitudeFor('5'))
-	}
-}
-
 // TestScentMagnitudeFor_DefaultsToOne: every follower uses the
 // baseline 1.0 multiplier.
 func TestScentMagnitudeFor_DefaultsToOne(t *testing.T) {
-	for _, l := range []rune{'5', '6'} {
+	for _, l := range []rune{'4', '5'} {
 		if got := ScentMagnitudeFor(l); got != 1.0 {
 			t.Errorf("ScentMagnitudeFor(%c) = %v, want 1.0", l, got)
 		}
@@ -1195,16 +1173,16 @@ func TestEnforceSwarmQuorum_DraftClearsTrustee(t *testing.T) {
 	}
 }
 
-// TestStrategyUsesScent_LettersUVWX: only U, V, W, X claim to use
-// scent at decision time. R, S, T (and unrecognized letters) return
-// false.
-func TestStrategyUsesScent_LettersUVWX(t *testing.T) {
-	for _, l := range []rune{'U', 'V', 'W', 'X'} {
+// TestStrategyUsesScent_LettersUV: only U (POMCP) and V (QMDP) claim
+// to use scent at decision time. R, S, T (and unrecognized letters)
+// return false.
+func TestStrategyUsesScent_LettersUV(t *testing.T) {
+	for _, l := range []rune{'U', 'V'} {
 		if !StrategyUsesScent(l) {
 			t.Errorf("StrategyUsesScent(%c) = false, want true", l)
 		}
 	}
-	for _, l := range []rune{'R', 'S', 'T', 'Z', 0} {
+	for _, l := range []rune{'R', 'S', 'T', 'W', 'X', 'Z', 0} {
 		if StrategyUsesScent(l) {
 			t.Errorf("StrategyUsesScent(%c) = true, want false", l)
 		}
@@ -1693,8 +1671,8 @@ func TestWriteStatsLog_RoundTrip(t *testing.T) {
 	if rec.Seed != 292 {
 		t.Errorf("seed = %d, want 292", rec.Seed)
 	}
-	if len(rec.Agents) != 6 {
-		t.Errorf("agent rows = %d, want 6", len(rec.Agents))
+	if len(rec.Agents) != 5 {
+		t.Errorf("agent rows = %d, want 5", len(rec.Agents))
 	}
 }
 

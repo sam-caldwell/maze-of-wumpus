@@ -11,7 +11,7 @@ import (
 // any fully-explored direction are excluded.
 func TestUntakenUnexploredBranches(t *testing.T) {
 	w := newConfiguredWorld(30)
-	a := world.SpawnAgentForTest(w, '6')
+	a := world.SpawnAgentForTest(w, '5')
 	a.Pos = world.Pos{X: 50, Y: 50}
 	full := map[world.Pos]bool{}
 	for _, p := range []world.Pos{{X: 50, Y: 50}, {X: 50, Y: 49}, {X: 50, Y: 51}, {X: 49, Y: 50}, {X: 51, Y: 50}} {
@@ -56,7 +56,7 @@ func TestApplyForks_RespectsCap(t *testing.T) {
 // (lazy spawn). QMDP forks branches of comparable utility.
 func TestSwarmStrategy_SoloLeaderForksAtJunction(t *testing.T) {
 	w := newConfiguredWorld(33)
-	a := world.SpawnAgentForTest(w, '6')
+	a := world.SpawnAgentForTest(w, '5')
 	a.CurrentStrategy = StrategyQMDP
 	a.SwarmGroupID = 1
 	a.Beliefs = world.NewAgentBeliefs()
@@ -109,7 +109,7 @@ func TestFrontierSectorReps_OpenRoomMultipleDirections(t *testing.T) {
 // slots are free (open-space saturation), bounded by the cap.
 func TestSwarmRegionForks_SaturatesOpenSpace(t *testing.T) {
 	w := newConfiguredWorld(41)
-	a := world.SpawnAgentForTest(w, '6')
+	a := world.SpawnAgentForTest(w, '5')
 	a.CurrentStrategy = StrategyQMDP
 	a.SwarmGroupID = 1
 	a.Beliefs = world.NewAgentBeliefs()
@@ -142,7 +142,7 @@ func TestSwarmRegionForks_SaturatesOpenSpace(t *testing.T) {
 // once the goal is perceived; otherwise higher closer to peers.
 func TestSwarmDispersionPenalty_GatedAndRepels(t *testing.T) {
 	w := newConfiguredWorld(31)
-	a := world.SpawnAgentForTest(w, '6')
+	a := world.SpawnAgentForTest(w, '5')
 	a.KnownCells = map[world.Pos]bool{}
 	if swarmDispersionPenalty(w, a, world.Pos{X: 10, Y: 10}) != 0 {
 		t.Error("no peers → penalty should be 0")
@@ -163,7 +163,7 @@ func TestSwarmDispersionPenalty_GatedAndRepels(t *testing.T) {
 // gets a known-graph path to it that its planner can replay.
 func TestSeedGoalConvergencePath(t *testing.T) {
 	w := newConfiguredWorld(32)
-	a := world.SpawnAgentForTest(w, '6')
+	a := world.SpawnAgentForTest(w, '5')
 	goal := w.Maze.GoalPos
 	a.Pos = world.Pos{X: goal.X - 1, Y: goal.Y}
 	w.Maze.Cells[a.Pos.Y][a.Pos.X] = world.CellPath

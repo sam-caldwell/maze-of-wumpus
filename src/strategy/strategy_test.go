@@ -104,7 +104,7 @@ func TestStrategyLetters_RegistryComplete(t *testing.T) {
 }
 
 func TestForLabel_All(t *testing.T) {
-	for _, label := range []rune{'1', '2', '3', '4', '5', '6'} {
+	for _, label := range []rune{'1', '2', '3', '4', '5'} {
 		if ForLabel(label) == nil {
 			t.Errorf("ForLabel(%c) = nil", label)
 		}
@@ -117,11 +117,10 @@ func TestForLabel_All(t *testing.T) {
 func TestName_All(t *testing.T) {
 	want := map[rune]string{
 		'1': "bfs",
-		'2': "dfs",
-		'3': "bayesian",
-		'4': "swarm-bayesian",
-		'5': "pomcp",
-		'6': "qmdp",
+		'2': "bayesian",
+		'3': "swarm-bayesian",
+		'4': "pomcp",
+		'5': "qmdp",
 		'Z': "unknown",
 	}
 	for label, expected := range want {
@@ -163,25 +162,6 @@ func TestBFSStrategy_AllBranches(t *testing.T) {
 	}
 }
 
-// TestDFSStrategy_AllBranches mirrors TestBFSStrategy_AllBranches.
-func TestDFSStrategy_AllBranches(t *testing.T) {
-	w := newConfiguredWorld(171)
-	a := world.SpawnAgentForTest(w, '3')
-	_ = DFSStrategy(w, a)
-	if len(a.Plan) == 0 {
-		t.Fatal("expected DFS to compute a non-empty plan")
-	}
-	a.SearchAnim = nil
-	if len(a.Plan) > 0 {
-		_ = DFSStrategy(w, a)
-	}
-	a.Pos = w.Maze.GoalPos
-	a.Plan = nil
-	if got := DFSStrategy(w, a); got != a.Pos {
-		t.Errorf("at-goal DFS = %v, want %v", got, a.Pos)
-	}
-}
-
 // TestBFSToGoal_Unreachable: box off the start cell so BFS exhausts
 // without finding goal.
 func TestBFSToGoal_Unreachable(t *testing.T) {
@@ -193,21 +173,6 @@ func TestBFSToGoal_Unreachable(t *testing.T) {
 	}
 	if path := BFSToGoal(w, start); path != nil {
 		t.Errorf("unreachable BFS returned %v, want nil", path)
-	}
-}
-
-func TestDFSToGoal_NoPath(t *testing.T) {
-	w := newConfiguredWorld(50)
-	start := world.Pos{X: 40, Y: 40}
-	w.Maze.Cells[start.Y][start.X] = world.CellPath
-	for _, d := range world.Cardinals {
-		w.Maze.Cells[start.Y+d.Y][start.X+d.X] = world.CellWall
-	}
-	if path := DFSToGoal(w, start); path != nil {
-		t.Errorf("DFS from boxed-in cell returned %v, want nil", path)
-	}
-	if path := DFSToGoal(w, w.Maze.GoalPos); path != nil {
-		t.Errorf("DFS goal->goal returned %v, want nil", path)
 	}
 }
 

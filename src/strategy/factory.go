@@ -1,16 +1,15 @@
 // factory.go — ForLabel maps agent labels to their decision
 // strategies. Passed to world.Config.StrategyFor at construction time.
 //
-// Lineup:
+// Lineup (one agent per strategy letter):
 //
-//	1  bfs             — omniscient BFS benchmark (singleton)
-//	2  dfs             — omniscient DFS
-//	3  bayesian        — Wumpus-World Bayesian, strict PO, NO scent
-//	4  swarm-bayesian  — shared-knowledge Bayesian swarm
-//	5  pomcp           — flat Monte-Carlo planner with scent
-//	6  qmdp            — POMDP QMDP-style planner with scent
+//	1  bfs             — omniscient BFS benchmark (singleton, R)
+//	2  bayesian        — Wumpus-World Bayesian, strict PO, NO scent (T)
+//	3  swarm-bayesian  — shared-knowledge Bayesian swarm (S)
+//	4  pomcp           — flat Monte-Carlo planner with scent (U)
+//	5  qmdp            — POMDP QMDP-style planner with scent (V)
 //
-// All six agents share the same world.DefaultSmellRadius (2) and
+// All five agents share the same world.DefaultSmellRadius (2) and
 // world.DefaultSightRadius (10) — every agent sees out to 10 cells
 // and smells out to 2.
 package strategy
@@ -107,25 +106,44 @@ func NameByLetter(letter rune) string {
 
 // ForLabel returns the strategy assigned to the given agent label,
 // or nil if the label is unrecognised. This is the legacy identity
-// mapping; the live runtime dispatches per-journey via ForLetter and
-// the agent's CurrentStrategy. Label 4 (swarm-Bayesian) resolves to
-// the Bayesian planner, exactly as letter S does.
+// mapping; the live runtime dispatches via ForLetter and the agent's
+// fixed CurrentStrategy. Label 3 (swarm-Bayesian) resolves to the
+// Bayesian planner, exactly as letter S does.
 func ForLabel(label rune) world.Strategy {
 	switch label {
 	case '1':
 		return BFSStrategy
 	case '2':
-		return DFSStrategy
+		return BayesianStrategy
 	case '3':
 		return BayesianStrategy
 	case '4':
-		return BayesianStrategy
-	case '5':
 		return POMCPStrategy
-	case '6':
+	case '5':
 		return QMDPStrategy
 	}
 	return nil
+}
+
+// LetterForLabel returns the FIXED strategy letter each agent runs for
+// the entire game, keyed by its label. This drives the per-agent fixed-
+// strategy assignment (see world.Config.StrategyLetterForLabel) so an
+// agent never switches strategy across journeys. The roster is a 1:1
+// map onto the five strategy letters.
+func LetterForLabel(label rune) rune {
+	switch label {
+	case '1':
+		return StrategyBFS // R
+	case '2':
+		return StrategyBayesian // T
+	case '3':
+		return StrategySwarmBayesian // S
+	case '4':
+		return StrategyPOMCP // U
+	case '5':
+		return StrategyQMDP // V
+	}
+	return 0
 }
 
 // Name returns a human-readable label for the strategy assigned to
@@ -135,14 +153,12 @@ func Name(label rune) string {
 	case '1':
 		return "bfs"
 	case '2':
-		return "dfs"
-	case '3':
 		return "bayesian"
-	case '4':
+	case '3':
 		return "swarm-bayesian"
-	case '5':
+	case '4':
 		return "pomcp"
-	case '6':
+	case '5':
 		return "qmdp"
 	}
 	return "unknown"

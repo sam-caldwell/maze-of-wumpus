@@ -1,6 +1,6 @@
 // Package main: Maze of Wumpus — terminal-UI maze game.
 //
-// On launch a maze is procedurally generated. Six agents (1..6) each
+// On launch a maze is procedurally generated. Five agents (1..5) each
 // run a distinct decision strategy and race for the goal.
 //
 // Two execution modes:
@@ -40,6 +40,7 @@ func buildWorld(seed int64) *world.World {
 		StrategyFor:                  strategy.ForLabel,
 		StrategyForLetter:            strategy.ForLetter,
 		StrategyLetters:              strategy.StrategyLetters,
+		StrategyLetterForLabel:       strategy.LetterForLabel,
 		StrategyDescriptionForLetter: strategy.DescriptionByLetter,
 	})
 }
@@ -59,8 +60,8 @@ var runProgram = func(seed int64) error {
 	// Async model: simulation runs on its own goroutine, decoupled
 	// from rendering, so a slow Step() never freezes input/repaint.
 	m := tui.NewAsyncModel(seed, buildWorld)
-	// On macOS, kick off a non-blocking 'say' announcement that
-	// overlaps with the first TUI render. No-op on every other OS.
+	// Startup announcement hook (currently a no-op; the macOS `say`
+	// greeting was removed).
 	announce()
 	return teaRunner(m)
 }
@@ -154,7 +155,7 @@ func reseedHeadless(prevWorld *world.World) *world.World {
 }
 
 // writeHeadlessState emits one space-separated key=value record per
-// cycle, with per-agent fields for labels 1..6.
+// cycle, with per-agent fields for labels 1..5.
 func writeHeadlessState(out io.Writer, w *world.World) {
 	fmt.Fprintf(out, "cycle=%d optimal=%d paths=%d",
 		w.Cycle, w.Stats.OptimalDistance, w.Stats.ShortestPaths)

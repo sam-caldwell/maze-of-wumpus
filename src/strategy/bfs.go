@@ -7,7 +7,7 @@ import (
 
 // TargetFor returns the current planning target for `a`: the maze
 // goal. Hazards and water pits no longer exist, so the target is
-// always the goal. Kept for the B (BFS) and C (DFS) call sites.
+// always the goal.
 func TargetFor(w *world.World, a *world.Agent) world.Pos {
 	return w.Maze.GoalPos
 }

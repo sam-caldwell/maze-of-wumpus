@@ -1,6 +1,6 @@
 // world.go — Maze of Wumpus runtime state and per-tick simulation.
 //
-// Six agents (labeled '1'..'6') share the maze, each running its own
+// Five agents (labeled '1'..'5') share the maze, each running its own
 // decision Strategy. The world package is strategy-agnostic: it holds
 // the data (World, Agent) and the per-tick loop (Step) but does not
 // know which concrete strategy each agent runs. Strategies are
@@ -99,7 +99,7 @@ const KnownPathReward = 10.0
 const RealDistanceShaping = 1.0
 
 // SearchAnim is the per-agent state that drives the branch-decision
-// search animation used by agents 2 (BFS) and 3 (DFS).
+// search animation used by the omniscient BFS agent.
 //
 // When an agent enters a branch cell — one with at least two walkable
 // non-backwards neighbors — its strategy initializes a SearchAnim and
@@ -245,7 +245,7 @@ type Agent struct {
 	// Disabled, when true, removes the agent from the simulation
 	// entirely: no clock ticks, no movement, no combat, no respawn,
 	// not rendered by the TUI. Toggled at runtime by the per-agent
-	// number keys '1'..'6'. Defaults to true at construction.
+	// number keys '1'..'5'. Defaults to true at construction.
 	Disabled bool
 
 	// SearchAnim is non-nil while the agent is in the middle of the
@@ -619,9 +619,16 @@ type World struct {
 	// the world package never imports strategy/.
 	strategyForLetter func(rune) Strategy
 	// strategyLetters is the canonical list of available strategy
-	// letters (e.g. {'R','S','T','U','V','W','X'}) used by
-	// PickStrategy. Plumbed via Config.StrategyLetters.
+	// letters (e.g. {'R','S','T','U','V'}). Plumbed via
+	// Config.StrategyLetters; used by the legacy PickStrategy path and
+	// the trust-matrix UI.
 	strategyLetters []rune
+	// strategyLetterForLabel maps an agent label to the FIXED strategy
+	// letter it runs for the entire game (0 = no letter, dispatch via
+	// the agent's legacy Strategy field). Plumbed via
+	// Config.StrategyLetterForLabel. When set, it overrides the
+	// per-journey PickStrategy roll so each agent keeps one strategy.
+	strategyLetterForLabel func(rune) rune
 	// swarmGraphs holds one pruned-alive-cell cache per independent
 	// swarm group (keyed by SwarmGroupID). Each entry is rebuilt
 	// lazily by RecomputeSwarmGraphIfStale when that group's
@@ -653,10 +660,15 @@ type Config struct {
 	StrategyFor       func(rune) Strategy
 	StrategyForLetter func(rune) Strategy
 	// StrategyLetters is the runtime list of strategy letters
-	// available to PickStrategy (typically strategy.StrategyLetters).
-	// Nil disables per-journey switching and the agent's legacy
-	// Strategy field is used instead.
+	// (typically strategy.StrategyLetters). Surfaced in the trust-
+	// matrix UI and used by the legacy PickStrategy path.
 	StrategyLetters []rune
+	// StrategyLetterForLabel maps an agent label to the FIXED strategy
+	// letter it runs for the whole game. When set, each agent keeps a
+	// single strategy for the entire runtime (no per-journey switching).
+	// Return 0 for a label that has no letter, which then dispatches
+	// through the agent's legacy Strategy field.
+	StrategyLetterForLabel func(rune) rune
 	// StrategyDescriptionForLetter returns a human-readable (≤64
 	// char) description for a strategy letter — surfaced by the
 	// TUI's Agent-Algorithm Trust legend.
@@ -678,6 +690,7 @@ func NewWorldWithConfig(cfg Config) *World {
 		Rng:                          rand.New(rand.NewSource(cfg.Seed)),
 		strategyForLetter:            cfg.StrategyForLetter,
 		strategyLetters:              cfg.StrategyLetters,
+		strategyLetterForLabel:       cfg.StrategyLetterForLabel,
 		strategyDescriptionForLetter: cfg.StrategyDescriptionForLetter,
 		// TTL defaults to ENABLED so agents have a real failure
 		// signal to learn from (LearnedTTL only updates on TTL
@@ -696,12 +709,12 @@ func NewWorldWithConfig(cfg Config) *World {
 	if stratFor == nil {
 		stratFor = func(rune) Strategy { return nil }
 	}
-	// Per-journey strategy switching means EVERY agent can run ANY
-	// algorithm, so every agent gets the union of state slots needed
-	// by any strategy: AgentBeliefs (Bayesian / swarm-Bayesian /
-	// POMCP / QMDP).
-	labels := []rune{'1', '2', '3', '4', '5', '6'}
-	// All six agents spawn simultaneously on the first tick. The
+	// Each agent runs a single FIXED strategy for the whole game
+	// (assigned by label in RespawnAgents). Every agent still gets an
+	// AgentBeliefs slot since the Bayesian / swarm-Bayesian / POMCP /
+	// QMDP planners all reason over it.
+	labels := []rune{'1', '2', '3', '4', '5'}
+	// All five agents spawn simultaneously on the first tick. The
 	// per-agent perimeter entrances (assigned below) already
 	// distribute them across the maze, so we no longer stagger
 	// arrivals — there's no visual clumping at one door to avoid.
@@ -710,7 +723,7 @@ func NewWorldWithConfig(cfg Config) *World {
 		a := newAgent(&w.nextAgentID, l, stratFor(l), NewAgentBeliefs(), 1)
 		w.Agents = append(w.Agents, a)
 	}
-	// All six agents start enabled — the user toggles individual
+	// All five agents start enabled — the user toggles individual
 	// agents off (or back on) via their label key.
 	for _, a := range w.Agents {
 		a.Disabled = false
@@ -728,19 +741,14 @@ func NewWorldWithConfig(cfg Config) *World {
 	// PickTrustee the moment each follower agent comes alive (and
 	// again at the start of every subsequent journey).
 
-	// Per-agent entry assignment: pick distinct perimeter cells (one
-	// per agent) and carve each into the maze with a guaranteed path
-	// to the goal. Falls back to the canonical Maze.EntrancePos for
-	// every agent if the picker can't satisfy 6 distinct entries
-	// (extremely rare; the perimeter is ~400 cells).
-	entries := w.pickAgentEntrances(len(w.Agents))
-	// One goal-rooted Dijkstra here serves every per-agent OptimalDistance
-	// / ShortestPath derivation that follows, replacing what used to be
-	// 2N full-grid Dijkstras (two per agent). At 1024² this is the
-	// difference between a sub-second construction and ~10 seconds.
+	// Equidistant starts: every agent spawns at the single canonical
+	// Maze.EntrancePos, so all agents begin exactly the same optimal
+	// distance from the goal — a fair head-to-head between strategies.
+	// One goal-rooted Dijkstra here serves every per-agent
+	// OptimalDistance / ShortestPath derivation that follows.
 	costFromGoal := w.computeCostFromGoal()
-	for i, a := range w.Agents {
-		w.initAgentEntrance(a, entries[i], costFromGoal)
+	for _, a := range w.Agents {
+		w.initAgentEntrance(a, w.Maze.EntrancePos, costFromGoal)
 	}
 
 	// w.Stats.OptimalDistance is the canonical entrance→goal step
@@ -752,7 +760,7 @@ func NewWorldWithConfig(cfg Config) *World {
 	w.Stats.ShortestPaths = w.CountShortestPaths(w.Maze.EntrancePos, w.Maze.GoalPos, MaxShortestPathsCount)
 	// ShortestPathCells is the union of every agent's individual
 	// entrance→goal path. The TUI 's' overlay highlights this set,
-	// so the user sees all 6 agents' shortest routes simultaneously.
+	// so the user sees all 5 agents' shortest routes simultaneously.
 	w.ShortestPathCells = map[Pos]bool{}
 	for _, a := range w.Agents {
 		for p := range a.ShortestPath {
@@ -1318,7 +1326,7 @@ func newAgent(idCounter *int, label rune, strat Strategy, beliefs *AgentBeliefs,
 		Strategy:  strat,
 		Beliefs:   beliefs,
 		RespawnIn: initialRespawnIn,
-		Disabled:  true, // agents default to disabled; user enables via '1'..'6'
+		Disabled:  true, // agents default to disabled; user enables via '1'..'5'
 	}
 	*idCounter++
 	return a
@@ -1634,11 +1642,14 @@ func (w *World) RespawnAgents() {
 		}
 		a.Alive = true
 		a.Stats.Starts++
-		// New journey begins. Pick the strategy FIRST (50% softmax
-		// over trust, 50% uniform random); the trustee decision
-		// gates on whether the chosen strategy can even sense
-		// scent.
-		if len(w.strategyLetters) > 0 {
+		// Each agent runs a FIXED strategy for the entire game, keyed
+		// by its label — set the same letter every respawn so the
+		// strategy never changes across journeys. (Legacy fallback:
+		// when no fixed mapping is wired but a strategy-letter pool is,
+		// pick per-journey — used only by older tests.)
+		if w.strategyLetterForLabel != nil {
+			a.CurrentStrategy = w.strategyLetterForLabel(a.Label)
+		} else if len(w.strategyLetters) > 0 {
 			a.PickStrategy(w.strategyLetters, w.Rng)
 		}
 		// Only pick a trustee when the chosen strategy actually
@@ -1933,11 +1944,15 @@ func (w *World) KillAgent(a *Agent, reason ...string) {
 //
 // Lineup mapped to scent role:
 //
-//	Leaders:    1 (BFS), 2 (DFS), 3 (Bayesian), 4 (swarm-Bayesian)
-//	Followers:  5 (POMCP), 6 (QMDP)
+//	Leaders:    1 (BFS), 2 (Bayesian), 3 (swarm-Bayesian)
+//	Followers:  4 (POMCP), 5 (QMDP)
+//
+// Leaders are the scent-blind pathfinders whose trails are worth
+// following; the follower cohort (4-5) picks one as a trustee on any
+// journey it runs a scent-aware strategy.
 var (
-	ScentLeaderLabels   = []rune{'1', '2', '3', '4'}
-	ScentFollowerLabels = []rune{'5', '6'}
+	ScentLeaderLabels   = []rune{'1', '2', '3'}
+	ScentFollowerLabels = []rune{'4', '5'}
 )
 
 // ScentRunsForTrustWeighting: how many initial runs the agent makes
@@ -1953,7 +1968,7 @@ const (
 )
 
 // IsScentFollower reports whether `label` belongs to the follower
-// set (agents 5-6). Agents 1-4 are leaders, not followers.
+// set (agents 4-5). Agents 1-3 are leaders, not followers.
 func IsScentFollower(label rune) bool {
 	for _, l := range ScentFollowerLabels {
 		if l == label {
@@ -1985,8 +2000,8 @@ func ScentPeerLabels(self rune) []rune {
 const ScentShapingMagnitude = 50.0
 
 // ScentMagnitudeFor returns a per-follower multiplier on
-// ScentShapingMagnitude. Both followers (5 POMCP, 6 QMDP) read scent
-// directly in their planners, so the 1.0 baseline is sufficient.
+// ScentShapingMagnitude. Followers read scent directly in their
+// planners, so the 1.0 baseline is sufficient for all of them.
 func ScentMagnitudeFor(label rune) float64 {
 	return 1.0
 }

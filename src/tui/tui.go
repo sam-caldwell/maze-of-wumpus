@@ -1,13 +1,12 @@
 // tui.go — bubbletea Model + renderer for Maze of Wumpus.
 //
-// Six agents (labels '1'..'6') share the board, each colored distinctly:
+// Five agents (labels '1'..'5') share the board, each colored distinctly:
 //
 //	1 — blue    (BFS benchmark)
-//	2 — cyan    (DFS)
-//	3 — magenta (Bayesian)
-//	4 — green   (swarm-Bayesian)
-//	5 — yellow  (POMCP)
-//	6 — orange  (QMDP)
+//	2 — cyan    (Bayesian)
+//	3 — magenta (swarm-Bayesian)
+//	4 — green   (POMCP)
+//	5 — yellow  (QMDP)
 //
 // The goal is green on yellow; the entrance is cyan. Walls are grey
 // blocks, paths are dim dots.
@@ -35,7 +34,6 @@ var (
 	agent3Style = lipgloss.NewStyle().Foreground(lipgloss.Color("213")).Bold(true)
 	agent4Style = lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Bold(true)
 	agent5Style = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
-	agent6Style = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true) // orange (QMDP)
 	goalStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Background(lipgloss.Color("226")).Bold(true)
 	entranceStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true)
 	ghostStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
@@ -44,7 +42,6 @@ var (
 	scent3Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("213"))
 	scent4Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
 	scent5Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
-	scent6Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("208"))
 	titleStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
 	statStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
 	ttlWarnStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true)
@@ -65,14 +62,12 @@ var (
 	agent3Glyph   = agent3Style.Render("3")
 	agent4Glyph   = agent4Style.Render("4")
 	agent5Glyph   = agent5Style.Render("5")
-	agent6Glyph   = agent6Style.Render("6")
 	goalGlyph     = goalStyle.Render("G")
 	scent1Glyph   = scent1Style.Render("~")
 	scent2Glyph   = scent2Style.Render("~")
 	scent3Glyph   = scent3Style.Render("~")
 	scent4Glyph   = scent4Style.Render("~")
 	scent5Glyph   = scent5Style.Render("~")
-	scent6Glyph   = scent6Style.Render("~")
 	entranceGlyph = entranceStyle.Render("S") // generic fallback (no per-agent claim)
 
 	// agentEntranceGlyph maps an agent label to a "white agent-rune
@@ -87,7 +82,6 @@ var (
 		'3': "129", // purple
 		'4': "199", // pink-magenta
 		'5': "46",  // bright green
-		'6': "220", // gold
 	}
 	agentEntranceGlyph = func() map[rune]string {
 		out := map[rune]string{}
@@ -279,7 +273,7 @@ func (m *Model) keySwitch(s string) {
 		m.ShowPath = !m.ShowPath
 	case "t":
 		m.World.TTLDisabled = !m.World.TTLDisabled
-	case "1", "2", "3", "4", "5", "6":
+	case "1", "2", "3", "4", "5":
 		if a := m.World.AgentByLabel(rune(s[0])); a != nil {
 			a.Disabled = !a.Disabled
 		}
@@ -661,7 +655,7 @@ var swarmCloneGlyph = func() map[rune]string {
 
 // cellHasSwarmClone returns the owning leader's label and true if
 // any alive swarm clone occupies cell (x, y). Linear-scan over the
-// 6 agent slots × ≤10 clones per agent — at most 60 checks per
+// 5 agent slots × ≤10 clones per agent — at most 50 checks per
 // cell. Acceptable for first-cut TUI rendering.
 func cellHasSwarmClone(w *world.World, x, y int) (rune, bool) {
 	for _, leader := range w.Agents {
@@ -693,8 +687,6 @@ func (m Model) glyphAt(w *world.World, x, y int) string {
 			return agent4Glyph
 		case '5':
 			return agent5Glyph
-		case '6':
-			return agent6Glyph
 		}
 	}
 	// Swarm clones: each alive clone renders as a white "*" on the
@@ -745,8 +737,6 @@ func (m Model) glyphAt(w *world.World, x, y int) string {
 			return scent4Glyph
 		case '5':
 			return scent5Glyph
-		case '6':
-			return scent6Glyph
 		}
 		return pathGlyph
 	default:

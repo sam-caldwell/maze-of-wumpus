@@ -773,7 +773,7 @@ func TestSwarmLeaderStartsSolo_NoStartedBump(t *testing.T) {
 // Joining assigns the group and starts solo.
 func TestSwarmCloneSpawn_QmdpSwarmLetterV(t *testing.T) {
 	w := NewWorld(317)
-	a := w.AgentByLabel('6')
+	a := w.AgentByLabel('5')
 	a.CurrentStrategy = QmdpSwarmStrategyLetter
 	a.SwarmGroupID = 0
 	a.SwarmClones = nil
@@ -830,7 +830,7 @@ func TestMaintainSwarmMembership_RNeverSwarms(t *testing.T) {
 // no real death) — the same generic promotion path S uses.
 func TestSwarmLeaderPromotion_LetterV(t *testing.T) {
 	w := NewWorld(318)
-	a := SpawnAgentForTest(w, '6')
+	a := SpawnAgentForTest(w, '5')
 	a.CurrentStrategy = QmdpSwarmStrategyLetter
 	a.SwarmGroupID = 0
 	w.maintainSwarmMembership(a)

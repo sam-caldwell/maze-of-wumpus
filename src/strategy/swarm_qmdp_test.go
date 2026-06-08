@@ -24,7 +24,7 @@ func TestPlanFor_DispatchesPerAlgorithm(t *testing.T) {
 // their KnownCells; a different group does not leak in.
 func TestSwarmStrategy_SharesKnowledge(t *testing.T) {
 	w := newConfiguredWorld(24)
-	a := world.SpawnAgentForTest(w, '6')
+	a := world.SpawnAgentForTest(w, '4')
 	b := world.SpawnAgentForTest(w, '5')
 	a.CurrentStrategy = StrategyQMDP
 	b.CurrentStrategy = StrategyQMDP
@@ -46,7 +46,7 @@ func TestSwarmStrategy_SharesKnowledge(t *testing.T) {
 // roster (freeing a slot for future lazy forking — no auto-respawn).
 func TestSwarmClone_ThrashTerminatesAndFreesSlot(t *testing.T) {
 	w := newConfiguredWorld(26)
-	a := world.SpawnAgentForTest(w, '6')
+	a := world.SpawnAgentForTest(w, '5')
 	a.CurrentStrategy = StrategyQMDP
 	a.SwarmGroupID = 1
 	a.Pos = world.Pos{X: 40, Y: 40}
@@ -75,7 +75,7 @@ func TestSwarmClone_ThrashTerminatesAndFreesSlot(t *testing.T) {
 // aggregate, and not the leader's.
 func TestSwarmClone_ExpiresOnIndividualDistance(t *testing.T) {
 	w := newConfiguredWorld(50)
-	a := world.SpawnAgentForTest(w, '6')
+	a := world.SpawnAgentForTest(w, '5')
 	a.CurrentStrategy = StrategyQMDP
 	a.SwarmGroupID = 1
 	a.OptimalDistance = 10 // limit = TTLMultiplier*10 = 30
@@ -123,7 +123,7 @@ func TestSwarmClone_DistinctTrailNotThrashing(t *testing.T) {
 // sharing among leader and clones" requirement.
 func TestSwarmClone_SharesPerceptionWithLeader(t *testing.T) {
 	w := newConfiguredWorld(28)
-	a := world.SpawnAgentForTest(w, '6')
+	a := world.SpawnAgentForTest(w, '5')
 	a.CurrentStrategy = StrategyQMDP
 	a.SwarmGroupID = 1
 	a.Beliefs = world.NewAgentBeliefs()

@@ -28,11 +28,10 @@ func TestDescriptionByLetter(t *testing.T) {
 func TestName_AllAgentLabels(t *testing.T) {
 	cases := map[rune]string{
 		'1': "bfs",
-		'2': "dfs",
-		'3': "bayesian",
-		'4': "swarm-bayesian",
-		'5': "pomcp",
-		'6': "qmdp",
+		'2': "bayesian",
+		'3': "swarm-bayesian",
+		'4': "pomcp",
+		'5': "qmdp",
 	}
 	for l, want := range cases {
 		if got := Name(l); got != want {
@@ -49,7 +48,7 @@ func TestName_AllAgentLabels(t *testing.T) {
 // Verifies the function runs to completion and respects PO.
 func TestQMDPStrategy_BasicMove(t *testing.T) {
 	w := newConfiguredWorld(200)
-	a := world.SpawnAgentForTest(w, '6')
+	a := world.SpawnAgentForTest(w, '5')
 	a.Beliefs = world.NewAgentBeliefs()
 	a.KnownCells = map[world.Pos]bool{
 		a.Pos: true,
@@ -80,7 +79,7 @@ func TestQMDPStrategy_BasicMove(t *testing.T) {
 // fires (outwardBiasNeighbor).
 func TestQMDPStrategy_NoKnownNeighborsFallsBack(t *testing.T) {
 	w := newConfiguredWorld(201)
-	a := world.SpawnAgentForTest(w, '6')
+	a := world.SpawnAgentForTest(w, '5')
 	a.Beliefs = world.NewAgentBeliefs()
 	a.KnownCells = map[world.Pos]bool{a.Pos: true} // nothing else
 	got := QMDPStrategy(w, a)
@@ -328,7 +327,7 @@ func TestPrunedView_Cache_SkipsWhenLenUnchanged(t *testing.T) {
 // value after the strategy returns.
 func TestPOMCPStrategy_AppliesSoloPrune(t *testing.T) {
 	w := newConfiguredWorld(241)
-	a := world.SpawnAgentForTest(w, '6')
+	a := world.SpawnAgentForTest(w, '5')
 	a.CurrentStrategy = StrategyPOMCP
 	a.Beliefs = world.NewAgentBeliefs()
 	origCells := a.KnownCells
@@ -345,7 +344,7 @@ func TestPOMCPStrategy_AppliesSoloPrune(t *testing.T) {
 // TestSoloPrune_PreservesPOForW_NoGoalLeak: same PO guard for POMCP.
 func TestSoloPrune_PreservesPOForW_NoGoalLeak(t *testing.T) {
 	w := newConfiguredWorld(243)
-	a := world.SpawnAgentForTest(w, '6')
+	a := world.SpawnAgentForTest(w, '5')
 	a.CurrentStrategy = StrategyPOMCP
 	a.Beliefs = world.NewAgentBeliefs()
 	a.KnownCells = map[world.Pos]bool{a.Pos: true}

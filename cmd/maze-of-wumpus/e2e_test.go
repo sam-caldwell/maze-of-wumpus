@@ -68,7 +68,7 @@ func TestE2E_HeadlessOutputFormat(t *testing.T) {
 			label + `_score=-?\d+\.\d+ `
 	}
 	pat := `^cycle=(\d+) optimal=\d+ paths=\d+ `
-	for _, l := range []string{"1", "2", "3", "4", "5", "6"} {
+	for _, l := range []string{"1", "2", "3", "4", "5"} {
 		pat += agentPattern(l)
 	}
 	pat += `game_over=(true|false)$`
@@ -152,7 +152,7 @@ func TestE2E_InitialPopulationMatches(t *testing.T) {
 	if !strings.HasPrefix(first, "cycle=0") {
 		t.Errorf("first line not cycle=0: %q", first)
 	}
-	for _, l := range []string{"1_alive=", "2_alive=", "3_alive=", "4_alive=", "5_alive=", "6_alive="} {
+	for _, l := range []string{"1_alive=", "2_alive=", "3_alive=", "4_alive=", "5_alive="} {
 		if !strings.Contains(first, l) {
 			t.Errorf("missing %s in first record: %q", l, first)
 		}

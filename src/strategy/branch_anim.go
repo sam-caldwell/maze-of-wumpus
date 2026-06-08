@@ -1,5 +1,5 @@
 // branch_anim.go — drives the per-tick state machine for the branch-
-// decision animation that agents 2 (BFS) and 3 (DFS) use. When the
+// decision animation that the omniscient BFS agent uses. When the
 // agent reaches a cell with two or more candidate forward moves the
 // strategy spawns "ghost replicas" that fan out along each branch,
 // hold at max extent, retract back, and only then commit the planned
