@@ -415,12 +415,14 @@ type Agent struct {
 	// see all 12 routes at once.
 	ShortestPath map[Pos]bool
 
-	// DistFromStart[y][x] is the BFS distance from THIS agent's
-	// EntrancePos to (x, y) — the per-agent "outward bias" signal
-	// used by POMCP/QMDP/ScentFollower as the only legitimate
-	// spatial heuristic under strict PO. -1 means unreachable.
-	// Computed once at world construction.
-	DistFromStart [BoardHeight][BoardWidth]int
+	// DistFromStart[y][x] is the BFS distance from the agent's
+	// EntrancePos to (x, y) — the "outward bias" signal used by
+	// POMCP/QMDP as the only legitimate spatial heuristic under
+	// strict PO. -1 means unreachable. A pointer (not an inline
+	// 8 MB array): every agent spawns at the single canonical
+	// entrance, so all agents share World.DistFromStart by reference
+	// — computed once at construction, read-only thereafter.
+	DistFromStart *[BoardHeight][BoardWidth]int
 
 	// LearnedTTL is the agent's belief about how many steps it can
 	// take before the TTL killer fires. 0 means "unknown" (the
@@ -744,30 +746,33 @@ func NewWorldWithConfig(cfg Config) *World {
 	// Equidistant starts: every agent spawns at the single canonical
 	// Maze.EntrancePos, so all agents begin exactly the same optimal
 	// distance from the goal — a fair head-to-head between strategies.
-	// One goal-rooted Dijkstra here serves every per-agent
-	// OptimalDistance / ShortestPath derivation that follows.
+	// Because the entrance is shared, DistFromStart and the
+	// entrance→goal ShortestPath are IDENTICAL for every agent, so we
+	// compute them ONCE and share by reference. (Previously each agent
+	// ran its own full-board BFS + owned an 8 MB DistFromStart array;
+	// at 1024² that was 5× redundant work and ~40 MB.)
 	costFromGoal := w.computeCostFromGoal()
-	for _, a := range w.Agents {
-		w.initAgentEntrance(a, w.Maze.EntrancePos, costFromGoal)
-	}
-
-	// w.Stats.OptimalDistance is the canonical entrance→goal step
-	// count. Derive it from the same cost map: trace the path and
-	// use its length to match the prior len(DijkstraPath) semantics.
-	if path := w.tracePathToGoal(w.Maze.EntrancePos, costFromGoal); path != nil {
-		w.Stats.OptimalDistance = len(path)
-	}
-	w.Stats.ShortestPaths = w.CountShortestPaths(w.Maze.EntrancePos, w.Maze.GoalPos, MaxShortestPathsCount)
-	// ShortestPathCells is the union of every agent's individual
-	// entrance→goal path. The TUI 's' overlay highlights this set,
-	// so the user sees all 5 agents' shortest routes simultaneously.
-	w.ShortestPathCells = map[Pos]bool{}
-	for _, a := range w.Agents {
-		for p := range a.ShortestPath {
-			w.ShortestPathCells[p] = true
-		}
-	}
 	w.computeDistFromStart()
+	sharedShortest := map[Pos]bool{}
+	optimal := 0
+	if path := w.tracePathToGoal(w.Maze.EntrancePos, costFromGoal); path != nil {
+		sharedShortest[w.Maze.EntrancePos] = true
+		for _, p := range path {
+			sharedShortest[p] = true
+		}
+		optimal = len(path)
+	}
+	for _, a := range w.Agents {
+		a.EntrancePos = w.Maze.EntrancePos
+		a.DistFromStart = &w.DistFromStart
+		a.ShortestPath = sharedShortest
+		a.OptimalDistance = optimal
+	}
+	w.Stats.OptimalDistance = optimal
+	w.Stats.ShortestPaths = w.CountShortestPaths(w.Maze.EntrancePos, w.Maze.GoalPos, MaxShortestPathsCount)
+	// Every agent's ShortestPath is the same shared set, so the union
+	// the TUI 's' overlay highlights is just that set.
+	w.ShortestPathCells = sharedShortest
 	// First event in the rolling log is a random pick from the
 	// startingMessages pool — surfaces a friendly cue in the TUI
 	// before any death/goal happens. Yellow (neutral) so it reads
@@ -1035,15 +1040,19 @@ func (w *World) tracePathToGoal(from Pos, cost *[BoardHeight][BoardWidth]int) []
 
 // initAgentEntrance attaches a perimeter entry to an agent: stamps
 // the agent's EntrancePos, computes its OptimalDistance and
-// ShortestPath to the goal, and populates its per-agent DistFromStart
-// BFS table. Called once per agent at world construction; values
-// stay fixed for the life of the maze.
+// ShortestPath to the goal, and populates a per-agent DistFromStart
+// BFS table. Values stay fixed for the life of the maze.
+//
+// NOTE: world construction no longer calls this — all agents share
+// the canonical entrance, so the construction path computes
+// DistFromStart/ShortestPath once and shares them by reference. This
+// remains as the standalone per-entry builder (used directly by
+// tests that need an agent whose entry differs from the canonical
+// one).
 //
 // `costFromGoal` is the shared goal-rooted cost map (see
-// computeCostFromGoal). Reusing it across agents replaces the per-
-// agent pair of Dijkstras (one for OptimalDistance, one for the
-// ShortestPath set) with a single O(path) greedy trace — the chief
-// reason NewWorld is tractable on the 1024² board.
+// computeCostFromGoal); reusing it replaces a pair of per-agent
+// Dijkstras with a single O(path) greedy trace.
 func (w *World) initAgentEntrance(a *Agent, entry Pos, costFromGoal *[BoardHeight][BoardWidth]int) {
 	a.EntrancePos = entry
 	path := w.tracePathToGoal(entry, costFromGoal)
@@ -1060,6 +1069,7 @@ func (w *World) initAgentEntrance(a *Agent, entry Pos, costFromGoal *[BoardHeigh
 	// Per-agent DistFromStart BFS (4-connected, matches the existing
 	// World.computeDistFromStart semantics so strategy outward-bias
 	// math stays comparable).
+	a.DistFromStart = new([BoardHeight][BoardWidth]int)
 	for y := 0; y < BoardHeight; y++ {
 		for x := 0; x < BoardWidth; x++ {
 			a.DistFromStart[y][x] = -1
