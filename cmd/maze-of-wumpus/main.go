@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -31,6 +33,24 @@ import (
 	"maze-of-wumpus/src/tui"
 	"maze-of-wumpus/src/world"
 )
+
+// parseSize parses a "<cols>,<rows>" string (e.g. "80,40") into two
+// positive integers. Whitespace around the values is tolerated.
+func parseSize(s string) (cols, rows int, err error) {
+	parts := strings.Split(s, ",")
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("want <cols>,<rows>, got %q", s)
+	}
+	cols, err = strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil || cols <= 0 {
+		return 0, 0, fmt.Errorf("invalid columns %q", parts[0])
+	}
+	rows, err = strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil || rows <= 0 {
+		return 0, 0, fmt.Errorf("invalid rows %q", parts[1])
+	}
+	return cols, rows, nil
+}
 
 // buildWorld constructs a world with the full strategy configuration.
 // Used at launch and by the TUI's reseed.
@@ -66,6 +86,16 @@ var runProgram = func(seed int64) error {
 	return teaRunner(m)
 }
 
+// runProgramParallel launches the TUI driven by the worker-per-agent
+// parallel engine, so the maze is watched live while each agent navigates
+// it on its own goroutine at its own rate.
+var runProgramParallel = func(seed int64) error {
+	ensureLogDirs()
+	m := tui.NewParallelModel(seed, buildWorld)
+	announce()
+	return teaRunner(m)
+}
+
 // runApp parses CLI args and dispatches to either the TUI or the
 // headless writer. Returns the process exit code.
 func runApp(args []string, stdout, stderr io.Writer) int {
@@ -74,15 +104,40 @@ func runApp(args []string, stdout, stderr io.Writer) int {
 	seedFlag := fs.Int64("seed", 0, "rng seed (0 = use current time)")
 	headless := fs.Bool("headless", false, "run without TUI, write one state line per cycle to stdout")
 	steps := fs.Int("steps", 200, "headless: number of ticks to run")
+	parallel := fs.Bool("parallel", false, "TUI driven by the worker-per-agent parallel engine (agents navigate at their own rates)")
+	bench := fs.Bool("bench", false, "headless: run the serial and parallel engines for --duration and print per-agent throughput")
+	dur := fs.Duration("duration", 5*time.Second, "bench: wall-clock duration to run each of the serial and parallel passes")
+	size := fs.String("size", "", "maze size as <cols>,<rows> (default 1024,1024)")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	// Apply the board size BEFORE any world is constructed — the per-cell
+	// grids are allocated at this size.
+	if *size != "" {
+		cols, rows, err := parseSize(*size)
+		if err != nil {
+			fmt.Fprintln(stderr, "error: invalid --size:", err)
+			return 2
+		}
+		world.SetBoardSize(cols, rows)
 	}
 	seed := *seedFlag
 	if seed == 0 {
 		seed = time.Now().UnixNano()
 	}
+	if *bench {
+		runBenchmark(seed, *dur, stdout)
+		return 0
+	}
 	if *headless {
 		runHeadless(seed, *steps, stdout)
+		return 0
+	}
+	if *parallel {
+		if err := runProgramParallel(seed); err != nil {
+			fmt.Fprintln(stderr, "error:", err)
+			return 1
+		}
 		return 0
 	}
 	if err := runProgram(seed); err != nil {
@@ -97,6 +152,38 @@ func runApp(args []string, stdout, stderr io.Writer) int {
 func runHeadless(seed int64, steps int, stdout io.Writer) {
 	ensureLogDirs()
 	runHeadlessLoop(buildWorld(seed), steps, stdout)
+}
+
+// runBenchmark runs the same world twice — once with the serial Step
+// loop, once with the parallel worker-per-agent runner — for the same
+// wall duration, and prints both throughputs so the per-strategy and
+// overall difference is directly observable. Both passes use the same
+// seed; the parallel pass is non-deterministic by nature (independent
+// scheduling).
+func runBenchmark(seed int64, dur time.Duration, stdout io.Writer) {
+	ensureLogDirs()
+
+	// Serial baseline: count planning invocations = (alive agents) per
+	// cycle, the same unit the parallel runner counts as steps.
+	w := buildWorld(seed)
+	deadline := time.Now().Add(dur)
+	var cycles, agentSteps int64
+	for time.Now().Before(deadline) {
+		w.Step()
+		cycles++
+		for _, a := range w.Agents {
+			if a.Alive && !a.Disabled {
+				agentSteps++
+			}
+		}
+	}
+	fmt.Fprintf(stdout, "serial:   %.2fs wall, %d cycles, %d agent-steps (%.0f steps/s)\n",
+		dur.Seconds(), cycles, agentSteps, float64(agentSteps)/dur.Seconds())
+
+	// Parallel pass on a fresh world built from the same seed.
+	w2 := buildWorld(seed)
+	pr := world.NewParallelRunner(w2, 20*time.Millisecond)
+	fmt.Fprint(stdout, pr.Run(dur).String())
 }
 
 // ensureLogDirs creates the directories World.WriteStatsLog and
@@ -166,7 +253,7 @@ func writeHeadlessState(out io.Writer, w *world.World) {
 			a.Label, a.Stats.Deaths,
 			a.Label, a.Stats.GoalsReached,
 			a.Label, a.Stats.ActualDistance,
-			a.Label, a.Stats.Score(w.Cycle),
+			a.Label, a.Stats.Score(a.OptimalDistance),
 		)
 	}
 	fmt.Fprintf(out, " game_over=%v\n", w.GameOver)

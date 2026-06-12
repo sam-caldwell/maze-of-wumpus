@@ -153,75 +153,21 @@ func trustCell(score float64, present bool, isDiag bool) string {
 	return trustCellByIdx[trustColorIdx(score)]
 }
 
-// renderTrustMatrixLines builds the trust matrix as a slice of pre-
-// rendered text lines (one per row). The caller splices these next
-// to the maze grid in View. The shape is:
-//
-//	   1 2 3 4 5 6    ← header row (column labels)
-//	1  · - - - - -    ← agent 1's outgoing trust
-//	2  - · - - - -
-//	...
-//	6  - - - - - ·    ← agent 6's outgoing trust
+// renderTrustMatrixLines builds the right-pane panels as a slice of
+// pre-rendered text lines (one per row): the Agent-Algorithm Trust
+// matrix (with the heat legend), Strategy Performance, the Agent
+// Strategies legend, and the Events feed. The caller splices these next
+// to the maze grid in View.
 func renderTrustMatrixLines(w *world.World) []string {
 	lines := make([]string, 0, len(w.Agents)+2+len(trustHeatFG)/2+1)
-	// Title line above the grid.
-	lines = append(lines, trustMatrixTitleStyle.Render("Agent-Agent Trust"))
-	// Header line: blank for row-label column, then column labels.
-	var hdr strings.Builder
-	hdr.WriteString("  ")
-	for _, col := range w.Agents {
-		hdr.WriteString(string(col.Label))
-		hdr.WriteByte(' ')
-	}
-	lines = append(lines, hdr.String())
-	// One row per agent. The 16-step heat legend (8 entries × 2
-	// columns = 0..15) gets spliced into the right edge of the
-	// first 8 agent rows so it sits next to the matrix instead
-	// of below it — frees up vertical space for the panels that
-	// follow.
-	half := len(trustHeatFG) / 2 // 8
-	for i, row := range w.Agents {
-		var b strings.Builder
-		b.WriteString(string(row.Label))
-		b.WriteByte(' ')
-		for _, col := range w.Agents {
-			isDiag := row.Label == col.Label
-			var score float64
-			present := false
-			if !isDiag && row.TrustScores != nil {
-				score, present = row.TrustScores[col.Label]
-			}
-			b.WriteString(trustCell(score, present, isDiag))
-			b.WriteByte(' ')
-		}
-		if i < half {
-			b.WriteString("  ")
-			b.WriteString(legendCell(i))
-			b.WriteString("  ")
-			b.WriteString(legendCell(i + half))
-		}
-		lines = append(lines, b.String())
-	}
-	// When the roster has fewer rows than the legend needs (half = 8),
-	// emit the leftover legend entries on their own lines so the full
-	// 0..15 heat scale always renders, left-padded to clear the matrix.
-	leftPad := 2 + 2*len(w.Agents)
-	for i := len(w.Agents); i < half && i < len(legendCellByIdx); i++ {
-		var b strings.Builder
-		for j := 0; j < leftPad; j++ {
-			b.WriteByte(' ')
-		}
-		b.WriteString("  ")
-		b.WriteString(legendCell(i))
-		b.WriteString("  ")
-		b.WriteString(legendCell(i + half))
-		lines = append(lines, b.String())
-	}
-	// Agent-Algorithm Trust matrix sits below the legend. Rows are
-	// agents (same order as above); columns are strategy letters
-	// (R/S/T/U/V). Cells encode StrategyTrustScores using the
-	// same heat scale as the Agent-Agent matrix.
-	lines = append(lines, "")
+	// Agent-Algorithm Trust matrix. Rows are agents; columns are
+	// strategy letters (R/S/T/U/V). Cells encode StrategyTrustScores,
+	// heat-colored on the 0..15 scale shown by the legend spliced into
+	// the right edge of the first rows.
+	//
+	// (The former "Agent-Agent Trust" matrix was removed: agents no
+	// longer follow one another, so per-agent trust has nothing to
+	// display.)
 	lines = append(lines, trustMatrixTitleStyle.Render("Agent-Algorithm Trust"))
 	algoLetters := w.StrategyLettersForWorld()
 	if len(algoLetters) == 0 {
@@ -238,8 +184,11 @@ func renderTrustMatrixLines(w *world.World) []string {
 		algoHdr.WriteByte(' ')
 	}
 	lines = append(lines, algoHdr.String())
-	// One row per agent.
-	for _, row := range w.Agents {
+	// One row per agent. The 16-step heat legend (8 entries × 2 columns
+	// = 0..15) is spliced onto the right edge of the first 8 rows so it
+	// sits next to the matrix instead of below it.
+	half := len(trustHeatFG) / 2 // 8
+	for i, row := range w.Agents {
 		var b strings.Builder
 		b.WriteString(string(row.Label))
 		b.WriteByte(' ')
@@ -252,17 +201,38 @@ func renderTrustMatrixLines(w *world.World) []string {
 			b.WriteString(trustCell(score, present, false))
 			b.WriteByte(' ')
 		}
+		if i < half {
+			b.WriteString("  ")
+			b.WriteString(legendCell(i))
+			b.WriteString("  ")
+			b.WriteString(legendCell(i + half))
+		}
+		lines = append(lines, b.String())
+	}
+	// When the roster has fewer rows than the legend needs (half = 8),
+	// emit the leftover legend entries on their own lines so the full
+	// 0..15 heat scale always renders, left-padded to clear the matrix.
+	leftPad := 2 + 2*len(algoLetters)
+	for i := len(w.Agents); i < half && i < len(legendCellByIdx); i++ {
+		var b strings.Builder
+		for j := 0; j < leftPad; j++ {
+			b.WriteByte(' ')
+		}
+		b.WriteString("  ")
+		b.WriteString(legendCell(i))
+		b.WriteString("  ")
+		b.WriteString(legendCell(i + half))
 		lines = append(lines, b.String())
 	}
 	// Strategy Performance: per-letter run-end tallies (TTL deaths,
-	// no-follow vs following). Sits between the Agent-Algorithm
-	// matrix and the Agent Strategies legend. Each numeric column
-	// is independently normalized to a 0..15 heat scale so the
-	// winning/dominant strategy in each column glows red.
+	// wins, total runs). Sits between the Agent-Algorithm matrix and
+	// the Agent Strategies legend. Each numeric column is independently
+	// normalized to a 0..15 heat scale so the dominant strategy in each
+	// column glows red.
 	lines = append(lines, "")
 	lines = append(lines, trustMatrixTitleStyle.Render("Strategy Performance"))
-	lines = append(lines, "    Die.TTL  Win.NoFollow  Win.Following  #Runs")
-	ttlMax, noFollowMax, followingMax, totalMax := 0, 0, 0, 0
+	lines = append(lines, "    Die.TTL  Wins  #Runs")
+	ttlMax, winsMax, totalMax := 0, 0, 0
 	for _, l := range algoLetters {
 		c := w.StrategyPerf[l]
 		if c == nil {
@@ -271,11 +241,8 @@ func renderTrustMatrixLines(w *world.World) []string {
 		if c.TTLExpiry > ttlMax {
 			ttlMax = c.TTLExpiry
 		}
-		if c.NoFollow > noFollowMax {
-			noFollowMax = c.NoFollow
-		}
-		if c.Following > followingMax {
-			followingMax = c.Following
+		if c.Wins > winsMax {
+			winsMax = c.Wins
 		}
 		// #Runs is the count of all runs STARTED on this strategy,
 		// regardless of outcome (TTL death, hazard death, goal
@@ -289,11 +256,10 @@ func renderTrustMatrixLines(w *world.World) []string {
 		if c == nil {
 			c = &world.StrategyPerfCounts{}
 		}
-		lines = append(lines, fmt.Sprintf(" %c  %s  %s  %s  %s",
+		lines = append(lines, fmt.Sprintf(" %c  %s  %s  %s",
 			l,
 			strategyPerfCell(c.TTLExpiry, 7, ttlMax),
-			strategyPerfCell(c.NoFollow, 12, noFollowMax),
-			strategyPerfCell(c.Following, 13, followingMax),
+			strategyPerfCell(c.Wins, 4, winsMax),
 			strategyPerfCell(c.Started, 5, totalMax)))
 	}
 	// Algorithm legend: one row per letter, "<letter>  <description>".

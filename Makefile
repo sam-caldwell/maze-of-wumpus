@@ -1,4 +1,4 @@
-.PHONY: build lint test clean run all coverage
+.PHONY: build lint test clean run bench all coverage
 
 BINARY := build/maze-of-wumpus
 CMD    := ./cmd/maze-of-wumpus
@@ -29,6 +29,10 @@ clean:
 	rm -rf build
 	mkdir -p build
 
-## run: launch the compiled binary
+## run: live TUI with agents navigating in parallel (one worker per agent)
 run: build
-	./$(BINARY)
+	./$(BINARY) --parallel
+
+## bench: headless serial-vs-parallel throughput benchmark, 5s, random seed
+bench: build
+	./$(BINARY) --bench --duration=5s

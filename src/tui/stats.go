@@ -1,102 +1,46 @@
-// stats.go — decouples stats collection from stats rendering. The
-// simulation publishes a rendered stats frame (header, trust/info
-// panel lines, per-agent + status footer) over a channel; a listener
-// goroutine aggregates the stream into the latest frame; the UI reads
-// that frame and composes it with the live maze pane. Stat formatting
-// and the deep stat reads thus leave the UI goroutine entirely, and
-// the UI only briefly locks the world for the maze viewport.
+// stats.go — the value types the SimLoop and the UI goroutine exchange.
+//
+// The sim is the SOLE owner of the live *world.World; the UI goroutine
+// never touches it. All coupling flows through three immutable values:
+//
+//   - viewState   : the UI's scroll / size / overlay intent, published to
+//     the sim (atomic, latest-wins) so it renders the viewport the user
+//     is actually looking at.
+//   - screenFrame : a fully-composed, immutable screen the sim renders
+//     after each tick and stores atomically; the UI just displays it —
+//     no world access on the render path, no lock.
+//   - worldCmd    : a world mutation the UI posts to the sim's command
+//     channel (reseed, TTL/agent toggles). Applied on the sim goroutine
+//     at a tick boundary, so the world stays single-threaded without a
+//     mutex.
+//
+// This replaces the previous RWMutex-guarded shared-world design: there
+// is now exactly one writer (the sim goroutine) and the UI is a pure,
+// lock-free consumer of published frames.
 package tui
 
-import (
-	"strings"
-	"sync/atomic"
+import "maze-of-wumpus/src/world"
 
-	"maze-of-wumpus/src/world"
-)
-
-// StatsFrame is one published snapshot of the rendered stat panes.
-// Strings are pre-rendered so the UI just splices them — no world
-// access for stats on the render path.
-type StatsFrame struct {
-	header     string
-	rightLines []string
-	bottom     string
+// viewState is the UI's render intent. Published by the UI on resize and
+// on every keypress; loaded by the sim when it composes a frame. Scroll
+// offsets, terminal size, and the shortest-path overlay all live on the
+// UI side because they are display state, not world state.
+type viewState struct {
+	offsetX, offsetY int
+	termW, termH     int
+	showPath         bool
 }
 
-// captureStatsFrame renders the stat panes from `w`. Called by the sim
-// goroutine under the read lock (it reads world stats); never on the
-// UI goroutine. Reuses the existing renderers via a throwaway Model so
-// there's a single source of truth for stat formatting.
-func captureStatsFrame(w *world.World) *StatsFrame {
-	m := Model{World: w}
-	return &StatsFrame{
-		header:     m.renderHeader(),
-		rightLines: renderTrustMatrixLines(w),
-		bottom:     m.renderBottomPane(),
-	}
+// screenFrame is one fully-rendered screen plus the measured right-pane
+// width. The text is spliced as-is by the UI; rightW is fed back so the
+// UI can size its viewport / clamp scroll offsets without reading the
+// world.
+type screenFrame struct {
+	text   string
+	rightW int
 }
 
-func (f *StatsFrame) right() string { return strings.Join(f.rightLines, "\n") }
-
-// StatsAggregator is the listener: it receives published frames on a
-// channel and keeps the most recent in an atomic pointer the UI loads
-// lock-free. (Aggregation here is latest-wins; the world already keeps
-// the cumulative counters/averages the frames render.)
-type StatsAggregator struct {
-	ch      chan *StatsFrame
-	latest  atomic.Pointer[StatsFrame]
-	stop    chan struct{}
-	stopped chan struct{}
-}
-
-// NewStatsAggregator creates an aggregator with a single-slot inbox
-// (publishers drop-and-replace, so the listener always converges on
-// the freshest frame without blocking the sim).
-func NewStatsAggregator() *StatsAggregator {
-	return &StatsAggregator{
-		ch:      make(chan *StatsFrame, 1),
-		stop:    make(chan struct{}),
-		stopped: make(chan struct{}),
-	}
-}
-
-// Start launches the listener goroutine.
-func (a *StatsAggregator) Start() {
-	go func() {
-		defer close(a.stopped)
-		for {
-			select {
-			case <-a.stop:
-				return
-			case f := <-a.ch:
-				a.latest.Store(f)
-			}
-		}
-	}()
-}
-
-// publish hands a frame to the listener without blocking: if the inbox
-// is full, the stale frame is dropped and replaced with the newer one.
-func (a *StatsAggregator) publish(f *StatsFrame) {
-	for {
-		select {
-		case a.ch <- f:
-			return
-		default:
-			select {
-			case <-a.ch: // drop a stale frame, retry
-			default:
-			}
-		}
-	}
-}
-
-// Latest returns the freshest aggregated frame, or nil before the first
-// publish.
-func (a *StatsAggregator) Latest() *StatsFrame { return a.latest.Load() }
-
-// Stop halts the listener and waits for it to exit.
-func (a *StatsAggregator) Stop() {
-	close(a.stop)
-	<-a.stopped
-}
+// worldCmd is a world mutation posted by the UI and applied on the sim
+// goroutine. Returning a non-nil *World swaps the live world (used by
+// reseed); returning nil mutates in place (used by the toggles).
+type worldCmd func(*world.World) *world.World

@@ -1173,16 +1173,11 @@ func TestEnforceSwarmQuorum_DraftClearsTrustee(t *testing.T) {
 	}
 }
 
-// TestStrategyUsesScent_LettersUV: only U (POMCP) and V (QMDP) claim
-// to use scent at decision time. R, S, T (and unrecognized letters)
-// return false.
-func TestStrategyUsesScent_LettersUV(t *testing.T) {
-	for _, l := range []rune{'U', 'V'} {
-		if !StrategyUsesScent(l) {
-			t.Errorf("StrategyUsesScent(%c) = false, want true", l)
-		}
-	}
-	for _, l := range []rune{'R', 'S', 'T', 'W', 'X', 'Z', 0} {
+// TestStrategyUsesScent_AllFalse: scent following was removed, so no
+// strategy consults the scent channel — the predicate is false for every
+// letter.
+func TestStrategyUsesScent_AllFalse(t *testing.T) {
+	for _, l := range []rune{'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Z', 0} {
 		if StrategyUsesScent(l) {
 			t.Errorf("StrategyUsesScent(%c) = true, want false", l)
 		}
@@ -1212,37 +1207,15 @@ func TestRespawnAgents_NoTrusteeWhenStrategyBlind(t *testing.T) {
 	}
 }
 
-// TestRespawnAgents_TrusteeWhenStrategyScents: a follower-labeled
-// agent whose RespawnAgents-picked strategy IS scent-aware does
-// pick a trustee.
-func TestRespawnAgents_TrusteeWhenStrategyScents(t *testing.T) {
-	w := NewWorld(761)
-	w.strategyLetters = []rune{'U'} // scent-follower
-	a := w.AgentByLabel('4')
-	a.Disabled = false
-	a.Alive = false
-	a.RespawnIn = 0
-	// Make sure SOME leader is alive so PickTrustee has a candidate.
-	leader := w.AgentByLabel('1')
-	leader.Alive = true
-	leader.Disabled = false
-	w.RespawnAgents()
-	if a.CurrentStrategy != 'U' {
-		t.Fatalf("CurrentStrategy = %c, want U", a.CurrentStrategy)
-	}
-	if a.CurrentTrustee == 0 {
-		t.Errorf("CurrentTrustee = 0, want non-zero for scent-aware strategy")
-	}
-}
+// (TestRespawnAgents_TrusteeWhenStrategyScents was removed: no strategy
+// uses scent now, so respawn never picks a trustee.)
 
-// TestStrategyPerf_TTLDeathBumpsOnlyTTL: a TTL-expiry kill
-// increments Die.TTL but leaves Win.NoFollow and Win.Following
-// untouched (those are reserved for successful goal-reaches).
+// TestStrategyPerf_TTLDeathBumpsOnlyTTL: a TTL-expiry kill increments
+// Die.TTL but leaves Wins untouched (Wins is reserved for goal-reaches).
 func TestStrategyPerf_TTLDeathBumpsOnlyTTL(t *testing.T) {
 	w := NewWorld(750)
 	a := SpawnAgentForTest(w, '3')
 	a.CurrentStrategy = 'R'
-	a.CurrentTrustee = 0
 	w.KillAgent(a, "ttl")
 	c := w.StrategyPerf['R']
 	if c == nil {
@@ -1251,36 +1224,32 @@ func TestStrategyPerf_TTLDeathBumpsOnlyTTL(t *testing.T) {
 	if c.TTLExpiry != 1 {
 		t.Errorf("TTLExpiry = %d, want 1", c.TTLExpiry)
 	}
-	if c.NoFollow != 0 {
-		t.Errorf("NoFollow = %d, want 0 (deaths don't bump)", c.NoFollow)
-	}
-	if c.Following != 0 {
-		t.Errorf("Following = %d, want 0 (deaths don't bump)", c.Following)
+	if c.Wins != 0 {
+		t.Errorf("Wins = %d, want 0 (deaths don't bump)", c.Wins)
 	}
 }
 
 // TestStrategyPerf_NonTTLDeathBumpsNothing: deaths from non-TTL
-// causes (wumpus, fire pit, etc.) don't touch any counter — only
-// TTL deaths bump Die.TTL.
+// causes don't touch any counter — only TTL deaths bump Die.TTL.
 func TestStrategyPerf_NonTTLDeathBumpsNothing(t *testing.T) {
 	w := NewWorld(753)
 	a := SpawnAgentForTest(w, '3')
 	a.CurrentStrategy = 'R'
-	a.CurrentTrustee = 0
 	w.KillAgent(a, "wumpus")
 	c := w.StrategyPerf['R']
-	if c != nil && (c.TTLExpiry != 0 || c.NoFollow != 0 || c.Following != 0) {
+	if c != nil && (c.TTLExpiry != 0 || c.Wins != 0) {
 		t.Errorf("non-TTL death bumped a counter: %+v", *c)
 	}
 }
 
-// TestStrategyPerf_GoalReachWithTrusteeBumpsFollowing: a goal
-// reach with a CurrentTrustee bumps Win.Following only.
-func TestStrategyPerf_GoalReachWithTrusteeBumpsFollowing(t *testing.T) {
+// TestStrategyPerf_GoalReachBumpsWins: each goal reach bumps the
+// strategy's Wins, regardless of trustee state (scent following is gone,
+// so a win is just a win).
+func TestStrategyPerf_GoalReachBumpsWins(t *testing.T) {
 	w := NewWorld(751)
 	a := SpawnAgentForTest(w, '4')
 	a.CurrentStrategy = 'V'
-	a.CurrentTrustee = '2'
+	w.recordStrategyGoal(a)
 	w.recordStrategyGoal(a)
 	c := w.StrategyPerf['V']
 	if c == nil {
@@ -1289,28 +1258,8 @@ func TestStrategyPerf_GoalReachWithTrusteeBumpsFollowing(t *testing.T) {
 	if c.TTLExpiry != 0 {
 		t.Errorf("TTLExpiry = %d, want 0", c.TTLExpiry)
 	}
-	if c.NoFollow != 0 {
-		t.Errorf("NoFollow = %d, want 0", c.NoFollow)
-	}
-	if c.Following != 1 {
-		t.Errorf("Following = %d, want 1", c.Following)
-	}
-}
-
-// TestStrategyPerf_GoalReachWithoutTrusteeBumpsNoFollow: a goal
-// reach with no CurrentTrustee bumps Win.NoFollow only.
-func TestStrategyPerf_GoalReachWithoutTrusteeBumpsNoFollow(t *testing.T) {
-	w := NewWorld(754)
-	a := SpawnAgentForTest(w, '3')
-	a.CurrentStrategy = 'T'
-	a.CurrentTrustee = 0
-	w.recordStrategyGoal(a)
-	c := w.StrategyPerf['T']
-	if c == nil {
-		t.Fatal("StrategyPerf['T'] not recorded")
-	}
-	if c.NoFollow != 1 {
-		t.Errorf("NoFollow = %d, want 1", c.NoFollow)
+	if c.Wins != 2 {
+		t.Errorf("Wins = %d, want 2", c.Wins)
 	}
 }
 
@@ -1823,8 +1772,9 @@ func TestSolveTimeAggregates_TrackedAcrossGoals(t *testing.T) {
 }
 
 // TestPathAlignment_OnPathStepCounted: walking onto a ShortestPathCells
-// cell bumps OnPathSteps; walking elsewhere bumps OffPathSteps. Score
-// reflects (OnPath - OffPath) / OptimalDistance.
+// cell bumps OnPathSteps; walking elsewhere bumps OffPathSteps. (These
+// feed BestAlignment; Score is now the step-count efficiency ratio, not
+// a cell-overlap fraction.)
 func TestPathAlignment_OnPathStepCounted(t *testing.T) {
 	w := NewWorld(241)
 	a := SpawnAgentForTest(w, '1')
@@ -1996,5 +1946,56 @@ func TestKnownPathReward_OncePerCellEver(t *testing.T) {
 	if a.PendingBonus != 0 {
 		t.Errorf("KnownPathReward fired twice: first=%v, second=%v",
 			first, a.PendingBonus)
+	}
+}
+
+// TestStrategyPerf_SwarmLeaderTTLPromotionTalliesDieTTL: when a swarm
+// leader hits TTL but survives by promoting a clone, the strategy's
+// Die.TTL still tallies the event (so frequent TTL hits are visible),
+// while the agent's own Deaths count intentionally stays put (the journey
+// continues on the promoted clone).
+func TestStrategyPerf_SwarmLeaderTTLPromotionTalliesDieTTL(t *testing.T) {
+	w := NewWorld(760)
+	a := w.AgentByLabel('3')
+	a.CurrentStrategy = SwarmStrategyLetter
+	a.Alive = true
+	w.maintainSwarmMembership(a)
+	a.SwarmClones = []*SwarmClone{{Pos: Pos{X: 50, Y: 50}, Alive: true}}
+	prevDeaths := a.Stats.Deaths
+
+	w.KillAgent(a, "ttl")
+
+	if !a.Alive {
+		t.Fatal("leader should survive a TTL hit via clone promotion")
+	}
+	if a.Stats.Deaths != prevDeaths {
+		t.Errorf("promotion bumped Deaths %d → %d; should stay (body swap)", prevDeaths, a.Stats.Deaths)
+	}
+	c := w.StrategyPerf[a.CurrentStrategy]
+	if c == nil || c.TTLExpiry != 1 {
+		t.Errorf("Die.TTL = %+v, want TTLExpiry=1 (TTL promotion should tally)", c)
+	}
+}
+
+// TestTTLCeiling_TightensAfterSolve: before the first solve the TTL budget
+// is the generous exploration window (TTLMultiplier × optimal); once the
+// agent has solved, it tightens to the best solve distance so future runs
+// must match or beat it.
+func TestTTLCeiling_TightensAfterSolve(t *testing.T) {
+	w := NewWorld(770)
+	a := w.AgentByLabel('1')
+	a.OptimalDistance = 100
+	a.Stats.BestSolveDistance = 0 // not solved yet
+	if got, want := w.TTLCeiling(a), TTLMultiplier*100; got != want {
+		t.Errorf("pre-solve ceiling = %d, want %d (exploration window)", got, want)
+	}
+	a.Stats.BestSolveDistance = 60 // solved in 60 steps
+	if got := w.TTLCeiling(a); got != 60 {
+		t.Errorf("post-solve ceiling = %d, want 60 (best solve distance)", got)
+	}
+	// A better solve tightens it further.
+	a.Stats.BestSolveDistance = 48
+	if got := w.TTLCeiling(a); got != 48 {
+		t.Errorf("after improvement ceiling = %d, want 48", got)
 	}
 }

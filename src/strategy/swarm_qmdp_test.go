@@ -137,8 +137,51 @@ func TestSwarmClone_SharesPerceptionWithLeader(t *testing.T) {
 	}
 	var forks []forkReq
 	moveOneSwarmMember(w, a, c, planFor(a.CurrentStrategy),
-		spawnPolicyFor(a.CurrentStrategy), a.KnownCells, a.Pos, &forks)
+		spawnPolicyFor(a.CurrentStrategy), a.KnownCells, a.Pos, &forks, true)
 	if !a.KnownCells[c.Pos] {
 		t.Errorf("clone perception at %v not shared into leader's KnownCells", c.Pos)
+	}
+}
+
+// TestSwarmHasSolution: the gate that switches the swarm from exploring to
+// exploiting — true once a cached entrance→goal path exists or the goal is
+// perceived in the pooled KnownCells.
+func TestSwarmHasSolution(t *testing.T) {
+	w := newConfiguredWorld(31)
+	a := world.SpawnAgentForTest(w, '3')
+	a.KnownCells = map[world.Pos]bool{a.Pos: true}
+
+	if swarmHasSolution(w, a) {
+		t.Error("no route known yet — should be exploring")
+	}
+	// Goal perceived → a route can be planned → solution exists.
+	a.KnownCells[w.Maze.GoalPos] = true
+	if !swarmHasSolution(w, a) {
+		t.Error("goal perceived should count as a solution")
+	}
+	// Cached path (survives respawn) → solution exists even without the
+	// goal in this run's freshly-built KnownCells.
+	delete(a.KnownCells, w.Maze.GoalPos)
+	a.KnownShortestPath = []world.Pos{a.Pos, {X: a.Pos.X + 1, Y: a.Pos.Y}}
+	if !swarmHasSolution(w, a) {
+		t.Error("cached KnownShortestPath should count as a solution")
+	}
+}
+
+// TestSwarmStrategy_NoForkOnceGoalPerceived: with the goal already in the
+// pooled KnownCells, a SwarmStrategy tick must not spawn new exploratory
+// clones (exploitation, not exploration).
+func TestSwarmStrategy_NoForkOnceGoalPerceived(t *testing.T) {
+	w := newConfiguredWorld(32)
+	a := world.SpawnAgentForTest(w, '3')
+	a.CurrentStrategy = StrategySwarmBayesian
+	a.SwarmGroupID = 1
+	a.Beliefs = world.NewAgentBeliefs()
+	a.KnownCells = map[world.Pos]bool{a.Pos: true, w.Maze.GoalPos: true}
+	before := len(a.SwarmClones)
+	SwarmStrategy(w, a)
+	if len(a.SwarmClones) > before {
+		t.Errorf("swarm forked %d clones after the goal was perceived; want none",
+			len(a.SwarmClones)-before)
 	}
 }

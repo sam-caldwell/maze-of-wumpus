@@ -8,95 +8,84 @@ import (
 	"maze-of-wumpus/src/world"
 )
 
-// TestRenderTrustMatrix_HasTitle: the rendered matrix's first line
-// is the "Agent-Agent Trust" caption.
+// TestRenderTrustMatrix_HasTitle: the rendered panel's first line is
+// the "Agent-Algorithm Trust" caption (the Agent-Agent matrix was
+// removed).
 func TestRenderTrustMatrix_HasTitle(t *testing.T) {
-	w := world.NewWorld(1)
+	w := world.NewWorldWithConfig(world.Config{Seed: 1, StrategyLetters: []rune{'R', 'S'}})
 	lines := renderTrustMatrixLines(w)
 	if len(lines) < 1 {
 		t.Fatal("no matrix lines")
 	}
-	if !strings.Contains(lines[0], "Agent-Agent Trust") {
-		t.Errorf("first line = %q, want it to contain title", lines[0])
+	if !strings.Contains(lines[0], "Agent-Algorithm Trust") {
+		t.Errorf("first line = %q, want the Agent-Algorithm Trust title", lines[0])
 	}
 }
 
-// TestRenderTrustMatrix_HeaderAfterTitle: line 1 is the column-label
-// header row (now that the title occupies line 0).
+// TestRenderTrustMatrix_HeaderAfterTitle: line 1 is the strategy-letter
+// header row (the title occupies line 0).
 func TestRenderTrustMatrix_HeaderAfterTitle(t *testing.T) {
-	w := world.NewWorld(2)
+	w := world.NewWorldWithConfig(world.Config{Seed: 2, StrategyLetters: []rune{'R', 'S', 'T'}})
 	lines := renderTrustMatrixLines(w)
 	if len(lines) < 2 {
 		t.Fatal("expected ≥ 2 lines (title + header)")
 	}
-	// Header should list every agent label after the 2-space
-	// row-label gutter.
-	for _, a := range w.Agents {
-		if !strings.ContainsRune(lines[1], a.Label) {
-			t.Errorf("header missing label %c: %q", a.Label, lines[1])
+	// Header should list every strategy letter after the 2-space gutter.
+	for _, l := range []rune{'R', 'S', 'T'} {
+		if !strings.ContainsRune(lines[1], l) {
+			t.Errorf("header missing letter %c: %q", l, lines[1])
 		}
 	}
 }
 
-// TestRenderTrustMatrix_LegendInline: the 16-step heat legend is
-// spliced onto the right edge of the first 8 agent rows of the
-// Agent-Agent Trust grid, so the legend sits ADJACENT to the
-// matrix instead of below it. Each of the first 8 rows carries a
-// (low, high) index pair.
+// TestRenderTrustMatrix_LegendInline: the 16-step heat legend is spliced
+// onto the right edge of the first 8 rows of the Agent-Algorithm Trust
+// grid (agent rows, then legend-spill rows), each carrying a (low, high)
+// index pair.
 func TestRenderTrustMatrix_LegendInline(t *testing.T) {
-	w := world.NewWorld(3)
+	w := world.NewWorldWithConfig(world.Config{Seed: 3, StrategyLetters: []rune{'R', 'S'}})
 	lines := renderTrustMatrixLines(w)
-	// Agent rows start at index 2 (after title + header).
-	const agentRowStart = 2
+	// Rows start at index 2 (after the algo title + header).
+	const rowStart = 2
 	for i := 0; i < 8; i++ {
-		row := lines[agentRowStart+i]
+		row := lines[rowStart+i]
 		low := i
 		high := i + 8
 		if !strings.Contains(row, fmt.Sprintf("%2d", low)) {
-			t.Errorf("agent row %d missing low legend value %d: %q",
-				i, low, row)
+			t.Errorf("row %d missing low legend value %d: %q", i, low, row)
 		}
 		if !strings.Contains(row, fmt.Sprintf("%2d", high)) {
-			t.Errorf("agent row %d missing high legend value %d: %q",
-				i, high, row)
+			t.Errorf("row %d missing high legend value %d: %q", i, high, row)
 		}
 	}
 }
 
-// TestRenderTrustMatrix_AlgorithmMatrixBelow: after the legend, a
-// spacer + "Agent-Algorithm Trust" title + algorithm header + agent count
-// agent rows should appear when the world has strategy letters
-// configured.
-func TestRenderTrustMatrix_AlgorithmMatrixBelow(t *testing.T) {
+// TestRenderTrustMatrix_AlgorithmMatrixAtTop: the Agent-Algorithm Trust
+// matrix is now the first panel (title at line 0), followed by the
+// strategy-letter header.
+func TestRenderTrustMatrix_AlgorithmMatrixAtTop(t *testing.T) {
 	w := world.NewWorldWithConfig(world.Config{
 		Seed:            4,
 		StrategyLetters: []rune{'R', 'S', 'T'},
 	})
 	lines := renderTrustMatrixLines(w)
-	// Layout post-legend-move: title + header + agents + extra-legend
-	// rows + spacer + algorithm-trust title. The 16-step heat legend
-	// needs 8 rows; when the roster is shorter, the leftover entries
-	// spill onto their own lines below the agent rows.
-	extra := legendSpillRows(len(w.Agents))
-	algoStart := 1 + 1 + len(w.Agents) + extra + 1
-	if len(lines) < algoStart+1+1+len(w.Agents) {
+	if len(lines) < 2 {
 		t.Fatalf("not enough lines for algorithm matrix: %d", len(lines))
 	}
-	if !strings.Contains(lines[algoStart], "Agent-Algorithm Trust") {
-		t.Errorf("expected algorithm title at line %d, got %q",
-			algoStart, lines[algoStart])
+	if !strings.Contains(lines[0], "Agent-Algorithm Trust") {
+		t.Errorf("expected algorithm title at line 0, got %q", lines[0])
 	}
-	algoHdr := lines[algoStart+1]
 	for _, l := range []rune{'R', 'S', 'T'} {
-		if !strings.ContainsRune(algoHdr, l) {
-			t.Errorf("algorithm header missing %c: %q", l, algoHdr)
+		if !strings.ContainsRune(lines[1], l) {
+			t.Errorf("algorithm header missing %c: %q", l, lines[1])
 		}
 	}
 }
 
-// TestRenderTrustMatrix_AlgorithmLegend: after the algorithm matrix
-// rows, a spacer + one row per letter with a (truncated) description
-// appears when StrategyDescriptionForLetter is configured.
+// TestRenderTrustMatrix_AlgorithmLegend: an "Agent Strategies" legend
+// with one row per configured letter (truncated description) appears when
+// StrategyDescriptionForLetter is configured. Content-based so it stays
+// robust to panel-layout changes.
 func TestRenderTrustMatrix_AlgorithmLegend(t *testing.T) {
 	desc := map[rune]string{
 		'R': "First strategy",
@@ -107,29 +96,11 @@ func TestRenderTrustMatrix_AlgorithmLegend(t *testing.T) {
 		StrategyLetters:              []rune{'R', 'S'},
 		StrategyDescriptionForLetter: func(l rune) string { return desc[l] },
 	})
-	lines := renderTrustMatrixLines(w)
-	// Layout (from top), after the heat legend was moved inline
-	// next to the Agent-Agent Trust grid:
-	//   title + header + agents
-	// + spacer + algo-title + algo-header + agents
-	// + spacer + perf-title + perf-header + N perf-rows
-	// + spacer + "Agent Strategies" title + N algo-legend
-	algoLetterCount := 2 // R, S configured below
-	extra := legendSpillRows(len(w.Agents))
-	titleIdx := 1 + 1 + len(w.Agents) + extra + 1 + 1 + 1 + len(w.Agents) + 1 + 1 + 1 + algoLetterCount + 1
-	legendStart := titleIdx + 1
-	if len(lines) < legendStart+2 {
-		t.Fatalf("not enough lines: %d (need ≥ %d)", len(lines), legendStart+2)
-	}
-	if !strings.Contains(lines[titleIdx], "Agent Strategies") {
-		t.Errorf("expected 'Agent Strategies' title at line %d, got %q",
-			titleIdx, lines[titleIdx])
-	}
-	if !strings.Contains(lines[legendStart], "First strategy") {
-		t.Errorf("legend row 0 = %q, want R description", lines[legendStart])
-	}
-	if !strings.Contains(lines[legendStart+1], "Second strategy") {
-		t.Errorf("legend row 1 = %q, want S description", lines[legendStart+1])
+	joined := strings.Join(renderTrustMatrixLines(w), "\n")
+	for _, want := range []string{"Agent Strategies", "First strategy", "Second strategy"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("rendered panel missing %q", want)
+		}
 	}
 }
 
@@ -144,20 +115,20 @@ func TestRenderTrustMatrix_StrategyPerfTable(t *testing.T) {
 	if w.StrategyPerf == nil {
 		w.StrategyPerf = map[rune]*world.StrategyPerfCounts{}
 	}
-	w.StrategyPerf['R'] = &world.StrategyPerfCounts{TTLExpiry: 3, NoFollow: 7, Following: 2}
-	w.StrategyPerf['S'] = &world.StrategyPerfCounts{TTLExpiry: 0, NoFollow: 1, Following: 5}
+	w.StrategyPerf['R'] = &world.StrategyPerfCounts{TTLExpiry: 3, Wins: 9, Started: 9}
+	w.StrategyPerf['S'] = &world.StrategyPerfCounts{TTLExpiry: 0, Wins: 6, Started: 6}
 	lines := renderTrustMatrixLines(w)
 	joined := strings.Join(lines, "\n")
 	if !strings.Contains(joined, "Strategy Performance") {
 		t.Error("missing 'Strategy Performance' title")
 	}
-	for _, want := range []string{"Die.TTL", "Win.NoFollow", "Win.Following", "#Runs"} {
+	for _, want := range []string{"Die.TTL", "Wins", "#Runs"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing column header %q", want)
 		}
 	}
-	// Verify R's row has all four numbers. R's #Runs == 7 + 2 = 9.
-	for _, want := range []string{"3", "7", "2", "9"} {
+	// Verify R's row numbers appear (TTL=3, Wins/#Runs=9).
+	for _, want := range []string{"3", "9"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing R-row counter %q", want)
 		}
@@ -175,8 +146,8 @@ func TestRenderTrustMatrix_StrategyPerfHeatBG(t *testing.T) {
 		StrategyLetters: []rune{'R', 'S'},
 	})
 	w.StrategyPerf = map[rune]*world.StrategyPerfCounts{
-		'R': {TTLExpiry: 10, NoFollow: 0, Following: 0},
-		'S': {TTLExpiry: 0, NoFollow: 0, Following: 0},
+		'R': {TTLExpiry: 10, Wins: 0},
+		'S': {TTLExpiry: 0, Wins: 0},
 	}
 	lines := renderTrustMatrixLines(w)
 	// Find R's perf row: starts with " R  " (then ANSI bg).

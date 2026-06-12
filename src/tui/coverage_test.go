@@ -8,20 +8,21 @@ import (
 	"maze-of-wumpus/src/world"
 )
 
-// TestFormatAgentStats_AllSolveTiers covers each lastSolveTier branch
-// (0..3 → green/yellow/orange/red).
-func TestFormatAgentStats_AllSolveTiers(t *testing.T) {
+// TestFormatAgentStats_AllScoreTiers covers each lastScoreTier branch
+// (0..3 → green/yellow/orange/red) through formatAgentStats.
+func TestFormatAgentStats_AllScoreTiers(t *testing.T) {
 	m := NewModel(101, world.NewWorld)
 	a := m.World.AgentByLabel('1')
 	a.RespawnIn = 0
 	m.World.RespawnAgents()
-	// MinSolveTime = 10, MaxSolveTime = 100, AvgSolveTime = 55. We
-	// flex LastSolveTime through the tier boundaries.
-	a.Stats.MinSolveTime = 10
-	a.Stats.MaxSolveTime = 100
-	a.Stats.AvgSolveTime = 55.0
-	for _, ls := range []int{10, 50, 70, 100} {
-		a.Stats.LastSolveTime = ls
+	// MinScore = 0.2, AvgScore = 0.5, MaxScore = 0.9. Flex LastScore
+	// through the tier boundaries (≥max, ≥avg, ≥min, <min).
+	a.Stats.GoalsReached = 3
+	a.Stats.MinScore = 0.2
+	a.Stats.AvgScore = 0.5
+	a.Stats.MaxScore = 0.9
+	for _, ls := range []float64{0.95, 0.6, 0.3, 0.1} {
+		a.Stats.LastScore = ls
 		_ = m.formatAgentStats(a)
 	}
 }
@@ -48,25 +49,21 @@ func TestFormatAgentStats_DistDangerAndWarn(t *testing.T) {
 	_ = m.formatAgentStats(a)
 }
 
-// TestFormatAgentStats_TrusteeAndStrategy: rendered with non-zero
-// trustee and CurrentStrategy.
-func TestFormatAgentStats_TrusteeAndStrategy(t *testing.T) {
+// TestFormatAgentStats_StrategyAndFails: the str: column shows the
+// current strategy letter and the f: column shows the death count.
+func TestFormatAgentStats_StrategyAndFails(t *testing.T) {
 	m := NewModel(103, world.NewWorld)
 	a := m.World.AgentByLabel('1')
 	a.RespawnIn = 0
 	m.World.RespawnAgents()
-	a.CurrentTrustee = '5'
 	a.CurrentStrategy = 'X'
-	a.LearnedTTL = 42
+	a.Stats.Deaths = 3
 	out := m.formatAgentStats(a)
-	if !strings.Contains(out, " f:5 ") {
-		t.Errorf("missing trustee f:5: %s", out)
-	}
 	if !strings.Contains(out, " str:X ") {
 		t.Errorf("missing strategy str:X: %s", out)
 	}
-	if !strings.Contains(out, "ttl:0042") {
-		t.Errorf("missing learned ttl: %s", out)
+	if !strings.Contains(out, " f:003 ") {
+		t.Errorf("missing fails f:003: %s", out)
 	}
 }
 

@@ -10,7 +10,7 @@
 //	  "run":           <Stats.GoalsReached after this solve>,
 //	  "distance":      <ActualDistance walked this life>,
 //	  "cycles":        <TicksAlive on this solve>,
-//	  "score":         <AgentStats.Score(world.Cycle) snapshot>,
+//	  "score":         <route efficiency in [0,1]: min(1, OptimalDistance/ActualDistance)>,
 //	  "world_cycle":   <World.Cycle at solve>,
 //	  "world_seed":    <World.Seed>
 //	}
@@ -64,7 +64,7 @@ func (w *World) appendSolveRecord(a *Agent) {
 		Run:        a.Stats.GoalsReached,
 		Distance:   a.Stats.ActualDistance,
 		Cycles:     a.TicksAlive,
-		Score:      a.Stats.Score(w.Cycle),
+		Score:      a.Stats.Score(a.OptimalDistance),
 		WorldCycle: w.Cycle,
 		WorldSeed:  w.Seed,
 	}

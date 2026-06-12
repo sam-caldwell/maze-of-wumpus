@@ -97,31 +97,34 @@ func TestGoalRespawnsAgent(t *testing.T) {
 	}
 }
 
-// TestScore_Formula: Score is cumulative goals per cycle.
+// TestScore_Formula: Score is the route-efficiency ratio
+// min(1, shortestPath/ActualDistance) — bounded to [0,1], higher is
+// better. 1.0 = reached (or on pace for) the goal in the optimal number
+// of steps via ANY route; a longer route scores proportionally lower.
 func TestScore_Formula(t *testing.T) {
 	tests := []struct {
-		name  string
-		s     AgentStats
-		cycle int
-		want  float64
+		name         string
+		s            AgentStats
+		shortestPath int
+		want         float64
 	}{
-		{"no goals, no cycles", AgentStats{}, 0, 0},
-		{"goals but cycle=0 returns 0",
-			AgentStats{GoalsReached: 5}, 0, 0},
-		{"no goals after N cycles = 0",
-			AgentStats{GoalsReached: 0}, 1000, 0.0},
-		{"1 goal in 100 cycles = 0.01",
-			AgentStats{GoalsReached: 1}, 100, 0.01},
-		{"5 goals in 1000 cycles = 0.005",
-			AgentStats{GoalsReached: 5}, 1000, 0.005},
-		{"OnPathSteps no longer influences Score",
-			AgentStats{GoalsReached: 2, OnPathSteps: 1000,
-				OffPathSteps: 5000, BestAlignment: 0.7}, 200, 0.01},
+		{"no steps yet returns 0", AgentStats{ActualDistance: 0}, 50, 0},
+		{"unknown optimal returns 0", AgentStats{ActualDistance: 30}, 0, 0},
+		{"optimal-length route = 1.0",
+			AgentStats{ActualDistance: 50}, 50, 1.0},
+		{"a different equal-length route also = 1.0 (cells don't matter)",
+			AgentStats{ActualDistance: 50, OffPathSteps: 50}, 50, 1.0},
+		{"still within budget (on pace) = 1.0",
+			AgentStats{ActualDistance: 30}, 50, 1.0},
+		{"twice the optimal length = 0.5",
+			AgentStats{ActualDistance: 100}, 50, 0.5},
+		{"25% over optimal = 0.8",
+			AgentStats{ActualDistance: 100}, 80, 0.8},
 	}
 	for _, tc := range tests {
-		if got := tc.s.Score(tc.cycle); got != tc.want {
+		if got := tc.s.Score(tc.shortestPath); got != tc.want {
 			t.Errorf("%s: Score(%d) = %v, want %v",
-				tc.name, tc.cycle, got, tc.want)
+				tc.name, tc.shortestPath, got, tc.want)
 		}
 	}
 }

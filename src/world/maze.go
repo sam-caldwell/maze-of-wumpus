@@ -31,7 +31,13 @@ const (
 	CellGoal
 )
 
-const (
+// BoardWidth / BoardHeight are the maze dimensions in cells. They
+// default to 1024×1024 but are runtime-configurable via SetBoardSize
+// (wired to the --size CLI flag). They are package VARIABLES rather than
+// constants because the grids they size are now slices, allocated at
+// world/maze construction from whatever value is in effect then. Set the
+// size ONCE at startup, before constructing any World or Maze.
+var (
 	BoardWidth  = 1024
 	BoardHeight = 1024
 )
@@ -39,8 +45,21 @@ const (
 // MinGoalDistanceCells is the minimum Manhattan distance from
 // EntrancePos that a randomly-placed GoalPos must satisfy. Half
 // the (W+H) bound makes the goal land in the far half of the map
-// regardless of where the entrance sits.
-const MinGoalDistanceCells = (BoardWidth + BoardHeight) / 2
+// regardless of where the entrance sits. Recomputed by SetBoardSize.
+var MinGoalDistanceCells = (BoardWidth + BoardHeight) / 2
+
+// SetBoardSize sets the maze dimensions (columns × rows) and recomputes
+// the derived bounds. Call it once at startup BEFORE any World or Maze is
+// constructed — the grids are sized from these values at construction
+// time. Non-positive dimensions are ignored.
+func SetBoardSize(width, height int) {
+	if width <= 0 || height <= 0 {
+		return
+	}
+	BoardWidth = width
+	BoardHeight = height
+	MinGoalDistanceCells = (BoardWidth + BoardHeight) / 2
+}
 
 // Room size bounds for the irregular-blob room carver.
 //
@@ -65,7 +84,7 @@ type Pos struct {
 // Maze holds the generated terrain. It's immutable after GenerateMaze
 // returns; entity positions live in World, not here.
 type Maze struct {
-	Cells       [BoardHeight][BoardWidth]CellType
+	Cells       [][]CellType // [BoardHeight][BoardWidth], allocated at GenerateMaze
 	EntrancePos Pos
 	GoalPos     Pos
 	Rooms       []Room
@@ -93,7 +112,7 @@ const OpenFieldProbability = 0.20
 // recursive-backtracker maze is carved from (0,0). Either way the
 // downstream room population runs.
 func GenerateMaze(rng *rand.Rand) *Maze {
-	m := &Maze{}
+	m := &Maze{Cells: newGrid[CellType]()}
 	for y := 0; y < BoardHeight; y++ {
 		for x := 0; x < BoardWidth; x++ {
 			m.Cells[y][x] = CellWall

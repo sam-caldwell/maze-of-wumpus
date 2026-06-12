@@ -15,13 +15,12 @@
 // Per-action utility at the agent's current cell:
 //
 //	Q(a) = qmdpExploreWeight × DistFromStart(s')
-//	     + qmdpScentWeight   × ScentSignedFreshness(s')
 //
 // where s' is the cell reached by action a. The explore term is the
-// strict-PO outward bias (the only spatial signal the agent
-// legitimately holds); the scent term integrates the trustee gradient
-// (positive for trustee, negative for negative-trust labels — the
-// dynamic repel).
+// strict-PO outward bias — the only spatial signal the agent
+// legitimately holds. (The scent channel has been dropped: QMDP no
+// longer consults trustee trails, so its decision is purely its own
+// outward-exploration gradient.)
 //
 // This is QMDP-style in spirit rather than a full POMDP solve: we
 // don't backpropagate value updates across belief transitions.
@@ -36,10 +35,7 @@ import (
 	"maze-of-wumpus/src/world"
 )
 
-const (
-	qmdpExploreWeight = 1.0
-	qmdpScentWeight   = 50.0 // matches ScentShapingMagnitude scale
-)
+const qmdpExploreWeight = 1.0
 
 // QMDPStrategy returns the next cell by QMDP-style expected-value
 // argmax over the 4 cardinal actions, using the outward-bias explore
@@ -79,8 +75,7 @@ func qmdpStrategyPlan(w *world.World, a *world.Agent) world.Pos {
 		if d := a.DistFromStart[np.Y][np.X]; d > 0 {
 			explore = float64(d)
 		}
-		scent := w.ScentSignedFreshness(a, np.X, np.Y)
-		score := qmdpExploreWeight*explore + qmdpScentWeight*scent
+		score := qmdpExploreWeight * explore
 		// Swarm dispersion: repel from nearby swarm-mates while
 		// exploring (no-op solo / once goal perceived).
 		score -= qmdpRepelWeight * swarmDispersionPenalty(w, a, np)

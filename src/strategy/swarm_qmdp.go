@@ -55,6 +55,16 @@ func SwarmStrategy(w *world.World, a *world.Agent) world.Pos {
 	plan := planFor(a.CurrentStrategy)
 	policy := spawnPolicyFor(a.CurrentStrategy)
 
+	// Explore only until the swarm has a route to the goal — a cached
+	// entrance→goal path from a prior solve, or the goal perceived this
+	// run. Once a solution exists, exploration is redundant: every off-
+	// solution branch is, by definition, wasted effort (the maze was
+	// already solved by path A, so re-walking path B is inefficient). So
+	// stop forking new clones and let the members converge onto the known
+	// path instead. Computed from the LEADER's state before any clone-
+	// position swap below.
+	exploring := !swarmHasSolution(w, a)
+
 	// forks accumulates branch cells to materialize as new clones after
 	// every existing member has moved (so a clone forked this tick
 	// doesn't also move this tick). Pass `orig` as the full perceived
@@ -66,7 +76,7 @@ func SwarmStrategy(w *world.World, a *world.Agent) world.Pos {
 		if c == nil || !c.Alive {
 			continue
 		}
-		moveOneSwarmMember(w, a, c, plan, policy, orig, leaderPos, &forks)
+		moveOneSwarmMember(w, a, c, plan, policy, orig, leaderPos, &forks, exploring)
 	}
 	// Leader move + its own adjacent-branch fork decision (a.Pos is the
 	// leader's cell).
@@ -74,13 +84,29 @@ func SwarmStrategy(w *world.World, a *world.Agent) world.Pos {
 	seedGoalConvergencePath(w, a)
 	taken := plan(w, a)
 	a.SwarmPeers = nil
-	collectForks(w, a, orig, taken, policy, &forks)
-	// Swarm-level region pass: fill remaining slots toward distinct,
-	// uncovered frontier directions (open rooms saturate; corridors,
-	// having frontier in only a sector or two, stay split at junctions).
-	swarmRegionForks(w, a, orig, leaderPos, &forks)
+	if exploring {
+		collectForks(w, a, orig, taken, policy, &forks)
+		// Swarm-level region pass: fill remaining slots toward distinct,
+		// uncovered frontier directions (open rooms saturate; corridors,
+		// having frontier in only a sector or two, stay split at
+		// junctions).
+		swarmRegionForks(w, a, orig, leaderPos, &forks)
+	}
 	applyForks(w, a, forks)
 	return taken
+}
+
+// swarmHasSolution reports whether the swarm already has a route to the
+// goal: a cached entrance→goal path from a prior solve (KnownShortestPath,
+// which survives respawn for the life of the map) or the goal perceived
+// in the pooled KnownCells this run. Once true, forking exploratory clones
+// down off-solution branches is wasted effort — the members should
+// converge on the known path instead.
+func swarmHasSolution(w *world.World, a *world.Agent) bool {
+	if len(a.KnownShortestPath) >= 2 {
+		return true
+	}
+	return a.KnownCells != nil && a.KnownCells[w.Maze.GoalPos]
 }
 
 // planFor maps a swarm letter to its full strategy function — the
@@ -127,7 +153,7 @@ func pruneDeadSwarmClones(a *world.Agent) {
 // Pos/Plan/KnownShortestPath are swapped to the clone's for the
 // duration so the planner operates from the clone's viewpoint against
 // the SHARED (swarm-pruned) beliefs/known map; they're restored after.
-func moveOneSwarmMember(w *world.World, a *world.Agent, c *world.SwarmClone, plan world.Strategy, policy spawnPolicy, fullKnown map[world.Pos]bool, leaderPos world.Pos, forks *[]forkReq) {
+func moveOneSwarmMember(w *world.World, a *world.Agent, c *world.SwarmClone, plan world.Strategy, policy spawnPolicy, fullKnown map[world.Pos]bool, leaderPos world.Pos, forks *[]forkReq, exploring bool) {
 	origPos, origPlan, origPath := a.Pos, a.Plan, a.KnownShortestPath
 	cloneFrom := c.Pos // the clone's pre-move cell (for the decision log)
 	a.Pos, a.Plan, a.KnownShortestPath = c.Pos, c.Plan, c.KnownShortestPath
@@ -144,8 +170,11 @@ func moveOneSwarmMember(w *world.World, a *world.Agent, c *world.SwarmClone, pla
 	c.Plan, c.KnownShortestPath = a.Plan, a.KnownShortestPath
 
 	// Fork decision from the clone's CURRENT cell (a.Pos == c.Pos here,
-	// before the move commits).
-	collectForks(w, a, fullKnown, target, policy, forks)
+	// before the move commits) — only while still exploring; once the
+	// swarm has a solution, no new clones are spawned.
+	if exploring {
+		collectForks(w, a, fullKnown, target, policy, forks)
+	}
 
 	moved := false
 	if target != c.Pos && w.CanMoveTo(a, target) { // a.Pos == c.Pos here
@@ -159,8 +188,9 @@ func moveOneSwarmMember(w *world.World, a *world.Agent, c *world.SwarmClone, pla
 	w.MarkAgentSensed(a)
 	if moved {
 		c.Dist++ // individual travel — judged against TTL on its own
-		w.ScentOwner[c.Pos.Y][c.Pos.X] = a.Label
-		w.ScentCycle[c.Pos.Y][c.Pos.X] = w.Cycle
+		// Deposit through putScent so parallel runs buffer the write to
+		// the group (leader a) instead of racing on the shared grid.
+		w.PutScent(a, c.Pos.X, c.Pos.Y)
 	}
 	if w.DecisionLogEnabled {
 		w.LogDecision(fmt.Sprintf("t%d %c~ (%d,%d)->(%d,%d) d%d",

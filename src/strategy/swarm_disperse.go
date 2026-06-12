@@ -133,4 +133,9 @@ func seedGoalConvergencePath(w *world.World, a *world.Agent) {
 	full = append(full, a.Pos)
 	full = append(full, path...)
 	a.KnownShortestPath = full
+	// Drop any stale exploration plan so the member fully abandons the
+	// branch it was probing and commits to the goal route — without this,
+	// the planner's frontier plan would resume the moment the convergence
+	// path is briefly interrupted.
+	a.Plan = nil
 }

@@ -179,30 +179,43 @@ type AgentStats struct {
 	MaxSolveTime  int
 	AvgSolveTime  float64
 	LastSolveTime int
+
+	// Per-solve path-accuracy Score aggregates (the journey's
+	// OnPath/(OnPath+OffPath), in [0,1]). Min/Max/Avg roll across every
+	// goal-reach; Last is the most recent. All 0 until the first solve;
+	// seeded on solve #1 (0 is a valid score, so they can't use a zero
+	// sentinel — GoalsReached gates seeding). Surfaced by the stats
+	// board's s[min/avg/max/last] column.
+	MinScore  float64
+	MaxScore  float64
+	AvgScore  float64
+	LastScore float64
 }
 
-// Score is the per-agent figure of merit: cumulative solves-per-cycle
-// throughput.
+// Score is the per-agent route-efficiency figure of merit: how the
+// agent's STEP COUNT this life compares to the shortest possible.
 //
-//	score = GoalsReached / cycle
+//	score = min(1, shortestPath / ActualDistance)
 //
-// All quantities are in cycles of simulated time (TicksAlive,
-// MinSolveTime, MaxSolveTime, etc. are all denominated in cycles).
-// The score therefore reads as "average solves per cycle of
-// elapsed simulation" — a single number that captures how
-// efficient the agent's algorithm is overall, normalized for
-// deaths, respawn downtime, and exploration.
+// where shortestPath is the optimal EntrancePos→goal step count
+// (Agent.OptimalDistance) and ActualDistance is the steps the agent has
+// taken. Bounded to [0, 1], HIGHER IS BETTER: 1.0 means the agent reached
+// the goal in the optimal number of steps — via ANY route, not just the
+// single path the 's' overlay highlights, since many routes share the
+// optimal length. A route twice as long scores 0.5.
 //
-// Returns 0 before any cycle has elapsed.
-//
-// OnPathSteps / OffPathSteps / BestAlignment are still maintained
-// on the struct for downstream analysis but no longer feed into the
-// Score formula.
-func (s AgentStats) Score(cycle int) float64 {
-	if cycle <= 0 {
+// The score stays 1.0 while the agent is still within the optimal step
+// budget (ActualDistance ≤ shortestPath — it could yet finish optimally);
+// once it overshoots, it decays as shortestPath/ActualDistance. Returns 0
+// before the first step or when the optimal length is unknown.
+func (s AgentStats) Score(shortestPath int) float64 {
+	if shortestPath <= 0 || s.ActualDistance <= 0 {
 		return 0
 	}
-	return float64(s.GoalsReached) / float64(cycle)
+	if s.ActualDistance <= shortestPath {
+		return 1.0
+	}
+	return float64(shortestPath) / float64(s.ActualDistance)
 }
 
 // Agent: one of the five competing automata.
@@ -418,11 +431,11 @@ type Agent struct {
 	// DistFromStart[y][x] is the BFS distance from the agent's
 	// EntrancePos to (x, y) — the "outward bias" signal used by
 	// POMCP/QMDP as the only legitimate spatial heuristic under
-	// strict PO. -1 means unreachable. A pointer (not an inline
-	// 8 MB array): every agent spawns at the single canonical
-	// entrance, so all agents share World.DistFromStart by reference
-	// — computed once at construction, read-only thereafter.
-	DistFromStart *[BoardHeight][BoardWidth]int
+	// strict PO. -1 means unreachable. A slice header (not an inline
+	// grid): every agent spawns at the single canonical entrance, so
+	// all agents share World.DistFromStart by reference — computed
+	// once at construction, read-only thereafter.
+	DistFromStart [][]int
 
 	// LearnedTTL is the agent's belief about how many steps it can
 	// take before the TTL killer fires. 0 means "unknown" (the
@@ -445,6 +458,38 @@ type Agent struct {
 	// Grafted across reseed as a prior — useful for the first
 	// journey of a new map until either signal updates it.
 	LearnedTTL int
+
+	// --- Parallel mode (see parallel.go / World.RunParallel) ---
+
+	// Rng, when non-nil, is this group's PRIVATE random source, used by
+	// its worker goroutine so concurrent agents never race on the shared
+	// World.Rng. Strategy code draws through World.AgentRng(a). nil in
+	// serial mode, where AgentRng falls back to World.Rng — so serial
+	// behavior (and its determinism) is unchanged.
+	Rng *rand.Rand
+
+	// scentBuf accumulates this group's scent deposits during a parallel
+	// stepping window (leader + clones). The barrier merges them into the
+	// canonical ScentOwner/ScentCycle grid. Deposits are routed through
+	// World.putScent; nil/unused in serial mode.
+	scentBuf []scentDeposit
+
+	// parked is set by the worker when the group has reached the goal or
+	// expired during a window, so it stops stepping until the barrier
+	// resolves the terminal event (and, on respawn, clears it). Guarded
+	// by the runner's barrier lock.
+	parked bool
+
+	// ParSteps is the lifetime count of parallel steps this group's
+	// worker has taken — the per-agent rate instrumentation. The worker
+	// increments it under the barrier read lock; the coordinator reads it
+	// under the write lock, so the barrier lock is its memory guard.
+	ParSteps int64
+
+	// StepsPerSec is this group's throughput (steps/second), refreshed by
+	// the parallel runner at each barrier and surfaced as the stats-board
+	// "rt:" column. 0 in serial mode (no parallel worker driving it).
+	StepsPerSec float64
 }
 
 // SwarmClonesPerLeader is the number of clone entities spawned
@@ -519,21 +564,11 @@ const (
 	MaxBenchmarkAgents           = 1
 )
 
-// StrategyUsesScent reports whether a strategy letter's decision
-// pipeline actually consults the scent channel. Used by the
-// respawn flow to gate trustee selection: agents on strategies
-// that ignore scent shouldn't pick a leader to "follow," since
-// they'd never actually sense the trail and the trustee would
-// just absorb unearned penalties at journey end.
-//
-//	U pomcp          — yes (scent weighting in rollouts)
-//	V qmdp           — yes (ScentSignedFreshness in utility score)
-//	R / S / T        — no (BFS / swarm-Bayesian / Bayesian, scent-blind)
+// StrategyUsesScent reports whether a strategy consults the scent
+// channel for decisions. No strategy does anymore — scent following was
+// removed entirely — so this is always false. Kept as a predicate so the
+// respawn flow's trustee-gate compiles to a no-op.
 func StrategyUsesScent(letter rune) bool {
-	switch letter {
-	case 'U', 'V':
-		return true
-	}
 	return false
 }
 
@@ -558,12 +593,12 @@ type World struct {
 	Seed int64
 
 	// ScentOwner[y][x]: label of the most recent agent to walk this
-	// cell, 0 = unscented. ScentCycle[y][x]: World.Cycle at deposit
-	// time, 0 = unscented. Together they drive the freshness signal
-	// agent 6 follows (decays linearly to zero over ScentMaxAge
-	// cycles).
-	ScentOwner [BoardHeight][BoardWidth]rune
-	ScentCycle [BoardHeight][BoardWidth]int
+	// cell, 0 = unscented. ScentCycle[y][x]: World.Cycle at the last
+	// deposit, 0 = unscented. Together they drive the trail's freshness,
+	// which fades to zero over ScentMaxAge cycles and is then removed
+	// (re-walking a cell re-stamps ScentCycle and resets the lifetime).
+	ScentOwner [][]rune // [BoardHeight][BoardWidth], allocated at construction
+	ScentCycle [][]int  // [BoardHeight][BoardWidth], allocated at construction
 
 	// Events is the rolling log of agent-lifecycle moments
 	// (deaths / goal reaches). Appended in order; the TUI shows
@@ -582,7 +617,7 @@ type World struct {
 	// the TUI's Strategy Performance table.
 	StrategyPerf map[rune]*StrategyPerfCounts
 
-	AgentAt [BoardHeight][BoardWidth]*Agent
+	AgentAt [][]*Agent // [BoardHeight][BoardWidth], allocated at construction
 
 	Agents []*Agent
 
@@ -606,7 +641,7 @@ type World struct {
 	// goal field. This is a partially-observable environment; the
 	// goal's location relative to any given cell must be inferred
 	// by agents, not pre-cached by the world.)
-	DistFromStart [BoardHeight][BoardWidth]int
+	DistFromStart [][]int // [BoardHeight][BoardWidth], allocated at construction
 
 	nextAgentID int
 
@@ -616,6 +651,12 @@ type World struct {
 	// are unique per world (reset to 0 on construction).
 	nextSwarmGroupID int
 	Rng              *rand.Rand
+
+	// parallel is set while a ParallelRunner is driving this world. It
+	// flips scent deposits (putScent) from direct grid writes to per-
+	// group buffering so concurrent worker goroutines never write the
+	// shared scent grid. False in serial mode (the default).
+	parallel bool
 	// strategyForLetter dispatches per-journey strategy by letter
 	// (R/S/T/U/V). Plumbed in from Config.StrategyForLetter so
 	// the world package never imports strategy/.
@@ -699,6 +740,12 @@ func NewWorldWithConfig(cfg Config) *World {
 		// deaths). Operators can disable it with 't'.
 		TTLDisabled: false,
 	}
+	// Allocate the per-cell grids at the current board size (the grids
+	// are slices now, not fixed arrays, so the maze is runtime-sizable).
+	w.ScentOwner = newGrid[rune]()
+	w.ScentCycle = newGrid[int]()
+	w.AgentAt = newGrid[*Agent]()
+	w.DistFromStart = newGrid[int]()
 	for attempt := 0; attempt < 50; attempt++ {
 		w.Maze = GenerateMaze(w.Rng)
 		n := w.CountShortestPaths(w.Maze.EntrancePos, w.Maze.GoalPos, MinAcceptablePaths)
@@ -751,11 +798,18 @@ func NewWorldWithConfig(cfg Config) *World {
 	// compute them ONCE and share by reference. (Previously each agent
 	// ran its own full-board BFS + owned an 8 MB DistFromStart array;
 	// at 1024² that was 5× redundant work and ~40 MB.)
-	costFromGoal := w.computeCostFromGoal()
 	w.computeDistFromStart()
+	// Shortest path for the 's' overlay AND OptimalDistance, computed with
+	// the SAME A* the omniscient R agent routes with — so the overlay
+	// reflects the actual shortest path R walks. A cardinal-first greedy
+	// descent of the Dijkstra cost field yields an equal-COST but more-
+	// CELLS route (it prefers many 10-cost cardinal steps over fewer
+	// 14-cost diagonals), which is why R was reaching the goal in fewer
+	// steps than the displayed "optimal." A* exploits the diagonals, so
+	// its cell count is the true shortest distance.
 	sharedShortest := map[Pos]bool{}
 	optimal := 0
-	if path := w.tracePathToGoal(w.Maze.EntrancePos, costFromGoal); path != nil {
+	if path := w.AStarPath(w.Maze.EntrancePos, w.Maze.GoalPos, w.Maze.IsWalkable); path != nil {
 		sharedShortest[w.Maze.EntrancePos] = true
 		for _, p := range path {
 			sharedShortest[p] = true
@@ -764,7 +818,7 @@ func NewWorldWithConfig(cfg Config) *World {
 	}
 	for _, a := range w.Agents {
 		a.EntrancePos = w.Maze.EntrancePos
-		a.DistFromStart = &w.DistFromStart
+		a.DistFromStart = w.DistFromStart // share the world's grid by reference
 		a.ShortestPath = sharedShortest
 		a.OptimalDistance = optimal
 	}
@@ -955,8 +1009,8 @@ func (w *World) reachableFromTo(from, to Pos) bool {
 // construction so per-agent OptimalDistance / ShortestPath can be
 // derived by O(path) greedy descent on the cost map instead of N
 // independent Dijkstras (one per agent).
-func (w *World) computeCostFromGoal() *[BoardHeight][BoardWidth]int {
-	cost := new([BoardHeight][BoardWidth]int)
+func (w *World) computeCostFromGoal() [][]int {
+	cost := newGrid[int]()
 	for y := 0; y < BoardHeight; y++ {
 		for x := 0; x < BoardWidth; x++ {
 			cost[y][x] = -1
@@ -995,7 +1049,7 @@ func (w *World) computeCostFromGoal() *[BoardHeight][BoardWidth]int {
 // StepCost(dir)`. The return excludes `from` and includes the goal
 // as the last entry, matching the contract of DijkstraPath. nil when
 // `from` is unreachable or already on the goal.
-func (w *World) tracePathToGoal(from Pos, cost *[BoardHeight][BoardWidth]int) []Pos {
+func (w *World) tracePathToGoal(from Pos, cost [][]int) []Pos {
 	if from == w.Maze.GoalPos {
 		return nil
 	}
@@ -1053,7 +1107,7 @@ func (w *World) tracePathToGoal(from Pos, cost *[BoardHeight][BoardWidth]int) []
 // `costFromGoal` is the shared goal-rooted cost map (see
 // computeCostFromGoal); reusing it replaces a pair of per-agent
 // Dijkstras with a single O(path) greedy trace.
-func (w *World) initAgentEntrance(a *Agent, entry Pos, costFromGoal *[BoardHeight][BoardWidth]int) {
+func (w *World) initAgentEntrance(a *Agent, entry Pos, costFromGoal [][]int) {
 	a.EntrancePos = entry
 	path := w.tracePathToGoal(entry, costFromGoal)
 	a.ShortestPath = map[Pos]bool{}
@@ -1069,7 +1123,7 @@ func (w *World) initAgentEntrance(a *Agent, entry Pos, costFromGoal *[BoardHeigh
 	// Per-agent DistFromStart BFS (4-connected, matches the existing
 	// World.computeDistFromStart semantics so strategy outward-bias
 	// math stays comparable).
-	a.DistFromStart = new([BoardHeight][BoardWidth]int)
+	a.DistFromStart = newGrid[int]()
 	for y := 0; y < BoardHeight; y++ {
 		for x := 0; x < BoardWidth; x++ {
 			a.DistFromStart[y][x] = -1
@@ -1378,6 +1432,34 @@ func (w *World) tickAgentClocks() {
 	}
 }
 
+// TTLCeiling is the agent's current time-to-live budget, in steps. Once
+// the agent has reached the goal, the budget tightens to its BEST solve
+// distance: future runs must match or beat the steps it took, which
+// pushes the agent to optimize toward the shortest path it can perceive
+// (a replay of its cached KnownShortestPath lands exactly at the budget
+// and survives; any wandering past it dies). Before the first solve, the
+// generous exploration window (TTLMultiplier × the EntrancePos→goal
+// shortest path) applies so the agent has room to find the goal at all.
+//
+// BestSolveDistance persists across respawns (same map) so the budget
+// keeps tightening, and resets on reseed (new map → fresh Stats) so a new
+// map starts on the exploration window again.
+func (w *World) TTLCeiling(a *Agent) int {
+	if a.Stats.BestSolveDistance > 0 {
+		return a.Stats.BestSolveDistance
+	}
+	budget := a.OptimalDistance
+	if budget <= 0 {
+		// Fallback for agents whose per-agent OptimalDistance wasn't
+		// initialized (e.g. unit tests that build Agents manually).
+		budget = w.Stats.OptimalDistance
+	}
+	if budget <= 0 {
+		return 0
+	}
+	return TTLMultiplier * budget
+}
+
 // MoveAgents drives every live agent through its strategy and commits
 // a move. Every agent MUST move at least one cell per cycle.
 func (w *World) MoveAgents() {
@@ -1493,21 +1575,10 @@ func (w *World) MoveAgents() {
 		}
 		a.LastFromCell = oldPos
 		a.HasLastFrom = true
-		a.PendingBonus += w.ApplyScentShaping(a)
-		// Per-agent TTL: each agent is judged against its OWN
-		// EntrancePos→GoalPos shortest path, not the world-wide one.
-		// Agents that spawn closer to the goal get a tighter TTL
-		// window; agents far from goal get a generous one — exactly
-		// scaled to the difficulty of their spawn.
-		ttlBudget := a.OptimalDistance
-		if ttlBudget <= 0 {
-			// Legacy fallback for agents whose per-agent OptimalDistance
-			// wasn't initialized (e.g., unit tests that build Agents
-			// manually). Use the world-wide value as a conservative
-			// default.
-			ttlBudget = w.Stats.OptimalDistance
-		}
-		if !w.TTLDisabled && ttlBudget > 0 && a.Stats.ActualDistance > TTLMultiplier*ttlBudget {
+		// Per-agent TTL: judged against the agent's current budget
+		// (TTLCeiling) — its best solve distance once it has reached the
+		// goal, else the generous exploration window.
+		if ceiling := w.TTLCeiling(a); !w.TTLDisabled && ceiling > 0 && a.Stats.ActualDistance > ceiling {
 			w.KillAgent(a, "ttl")
 		}
 		// Learn-by-dying invalidation half: if the agent's still
@@ -1561,7 +1632,9 @@ func (w *World) CanMoveTo(a *Agent, target Pos) bool {
 func (w *World) FallbackMove(a *Agent) Pos {
 	dirs := make([]Pos, len(Cardinals))
 	copy(dirs, Cardinals)
-	w.Rng.Shuffle(len(dirs), func(i, j int) { dirs[i], dirs[j] = dirs[j], dirs[i] })
+	// AgentRng → the group's private source in parallel mode (serial:
+	// falls back to the shared World.Rng, unchanged).
+	w.AgentRng(a).Shuffle(len(dirs), func(i, j int) { dirs[i], dirs[j] = dirs[j], dirs[i] })
 	for _, d := range dirs {
 		np := Pos{a.Pos.X + d.X, a.Pos.Y + d.Y}
 		if !w.CanMoveTo(a, np) {
@@ -1662,16 +1735,9 @@ func (w *World) RespawnAgents() {
 		} else if len(w.strategyLetters) > 0 {
 			a.PickStrategy(w.strategyLetters, w.Rng)
 		}
-		// Only pick a trustee when the chosen strategy actually
-		// consults the scent channel. Otherwise the agent would
-		// "follow" a leader it can't sense, and the leader's
-		// trust score would absorb undeserved penalties at
-		// journey end.
-		if StrategyUsesScent(a.CurrentStrategy) {
-			a.PickTrustee(w, w.Rng)
-		} else {
-			a.CurrentTrustee = 0
-		}
+		// No trustee: scent following is gone, so no agent follows a
+		// leader's trail.
+		a.CurrentTrustee = 0
 		a.Pos = entrance
 		a.Plan = nil
 		a.Stats.ActualDistance = 0
@@ -1850,6 +1916,23 @@ func (w *World) CheckGoal() {
 		n := float64(a.Stats.GoalsReached)
 		a.Stats.AvgSolveTime += (float64(t) - a.Stats.AvgSolveTime) / n
 		a.Stats.LastSolveTime = t
+		// Roll the path-accuracy Score aggregates for this solved
+		// journey. Seed min/max on the first solve (0 is a valid score,
+		// so GoalsReached==1 — not a zero sentinel — gates the seed).
+		sc := a.Stats.Score(a.OptimalDistance)
+		if a.Stats.GoalsReached == 1 {
+			a.Stats.MinScore = sc
+			a.Stats.MaxScore = sc
+		} else {
+			if sc < a.Stats.MinScore {
+				a.Stats.MinScore = sc
+			}
+			if sc > a.Stats.MaxScore {
+				a.Stats.MaxScore = sc
+			}
+		}
+		a.Stats.AvgScore += (sc - a.Stats.AvgScore) / n
+		a.Stats.LastScore = sc
 		if w.Stats.OptimalDistance > 0 {
 			alignment := float64(a.Stats.OnPathSteps-a.Stats.OffPathSteps) /
 				float64(w.Stats.OptimalDistance)
@@ -1864,8 +1947,7 @@ func (w *World) CheckGoal() {
 		// Journey ended in success — update trust before flipping.
 		w.endJourney(a, true)
 		w.recordAgentGoal(a)
-		// Strategy Performance: goal reach bumps Win.NoFollow or
-		// Win.Following based on trustee state.
+		// Strategy Performance: goal reach bumps the strategy's Wins.
 		w.recordStrategyGoal(a)
 		// Post-win path optimization: BFS through the agent's
 		// perceived terrain to find the shortest entrance→goal
@@ -1883,6 +1965,10 @@ func (w *World) CheckGoal() {
 // KillAgent removes the agent from the spatial index, increments per-
 // agent death counter, records the cause, and starts the respawn timer.
 func (w *World) KillAgent(a *Agent, reason ...string) {
+	r := "unknown"
+	if len(reason) > 0 && reason[0] != "" {
+		r = reason[0]
+	}
 	// Swarm leader promotion: if this agent is a swarm leader with
 	// at least one surviving clone, the clone is promoted into the
 	// leader slot instead of the swarm dissolving. The leader's
@@ -1913,6 +1999,13 @@ func (w *World) KillAgent(a *Agent, reason ...string) {
 			// Shrink the clone slice (remove the promoted one).
 			a.SwarmClones = append(a.SwarmClones[:i], a.SwarmClones[i+1:]...)
 			a.SearchAnim = nil
+			// The leader BODY hit its limit even though the swarm
+			// survives via the body-swap. Still tally the strategy-level
+			// outcome so Strategy Performance "Die.TTL" reflects how often
+			// this swarm hits TTL — the agent's own Deaths counter (a
+			// journey-end metric) intentionally stays put, since the
+			// journey continues on the promoted clone.
+			w.recordStrategyDeath(a, r == "ttl")
 			return
 		}
 		// No clones left to promote — the swarm dies for real.
@@ -1926,10 +2019,6 @@ func (w *World) KillAgent(a *Agent, reason ...string) {
 		w.AgentAt[a.Pos.Y][a.Pos.X] = nil
 	}
 	a.Stats.Deaths++
-	r := "unknown"
-	if len(reason) > 0 && reason[0] != "" {
-		r = reason[0]
-	}
 	a.Stats.LastDeathReason = r
 	// Learn-by-dying: a TTL death pins the agent's belief about
 	// its step budget. The killer fires the first step PAST the
@@ -1957,9 +2046,11 @@ func (w *World) KillAgent(a *Agent, reason ...string) {
 //	Leaders:    1 (BFS), 2 (Bayesian), 3 (swarm-Bayesian)
 //	Followers:  4 (POMCP), 5 (QMDP)
 //
-// Leaders are the scent-blind pathfinders whose trails are worth
-// following; the follower cohort (4-5) picks one as a trustee on any
-// journey it runs a scent-aware strategy.
+// Scent following has been removed: no agent ever picks a trustee
+// (RespawnAgents no longer calls PickTrustee), no scent-shaping reward is
+// applied (the call sites are gone), and no follower trust is learned
+// (endJourney no longer updates it). The follower/leader label sets are
+// retained only so the now-dormant helper functions still compile.
 var (
 	ScentLeaderLabels   = []rune{'1', '2', '3'}
 	ScentFollowerLabels = []rune{'4', '5'}
@@ -2371,18 +2462,16 @@ const (
 //     came near this agent on this journey).
 func (w *World) endJourney(a *Agent, success bool) {
 	w.updateStrategyTrust(a, success)
+	// The agent-to-agent follower-trust block below is now inert in the
+	// running game: scent following is removed, so CurrentTrustee is
+	// always 0 and OpportunisticFollowed is never populated. The logic is
+	// retained (and unit-tested) but never fires during play.
 	if !IsScentFollower(a.Label) {
 		return
 	}
 	if a.TrustScores == nil {
 		a.TrustScores = map[rune]float64{}
 	}
-	// Opportunistic-following credit: on a successful run, every
-	// OTHER-AGENT label whose scent this agent followed at least
-	// once during the journey gets a TrustGoalBonus (plus the
-	// within-TTL bonus if applicable). This is independent of the
-	// CurrentTrustee contact gate — opportunistic followings count
-	// even when no formal trustee was set.
 	if success {
 		ttlBudget := a.OptimalDistance
 		if ttlBudget <= 0 {
@@ -2392,7 +2481,7 @@ func (w *World) endJourney(a *Agent, success bool) {
 		withinTTL := optimalTTL > 0 && a.TicksAlive > 0 && a.TicksAlive <= optimalTTL
 		for owner := range a.OpportunisticFollowed {
 			if owner == a.CurrentTrustee {
-				continue // trustee gets its own credit below
+				continue
 			}
 			a.TrustScores[owner] += TrustGoalBonus
 			if withinTTL {
@@ -2400,9 +2489,6 @@ func (w *World) endJourney(a *Agent, success bool) {
 			}
 		}
 	}
-	// CurrentTrustee credit: gated on the existing contact threshold
-	// — the trustee isn't blamed (or credited) when the agent never
-	// actually sniffed them during the journey.
 	if a.CurrentTrustee == 0 {
 		return
 	}
@@ -2429,12 +2515,11 @@ func (w *World) endJourney(a *Agent, success bool) {
 // world (i.e., per-map, not lifetime).
 //
 //	TTLExpiry: runs that ended in a TTL-expiry death.
-//	NoFollow:  runs that ended (any cause) with no CurrentTrustee.
-//	Following: runs that ended (any cause) WITH a CurrentTrustee.
+//	Wins:      runs that reached the goal.
 //
-// NoFollow + Following == total runs counted for that strategy.
-// TTLExpiry is a subset; it's tallied independently regardless of
-// follow state.
+// TTLExpiry is tallied at death; Wins at goal-reach. (The former
+// follow/no-follow split is gone: with scent removed, no strategy
+// follows a trustee, so a win is just a win.)
 type StrategyPerfCounts struct {
 	// Started: total runs launched on this strategy — bumped once
 	// per journey at RespawnAgents (after quorum / singleton
@@ -2443,14 +2528,12 @@ type StrategyPerfCounts struct {
 	// goal-reaches are all included in the total.
 	Started   int
 	TTLExpiry int
-	NoFollow  int
-	Following int
+	Wins      int
 }
 
 // recordStrategyDeath bumps Strategy Performance counters when an
 // agent's journey ends in death. Only Die.TTL fires (and only for
-// reason == "ttl") — Win.NoFollow / Win.Following are reserved for
-// successful goal-reaches.
+// reason == "ttl") — Wins is reserved for successful goal-reaches.
 func (w *World) recordStrategyDeath(a *Agent, ttlExpiry bool) {
 	if a.CurrentStrategy == 0 || !ttlExpiry {
 		return
@@ -2459,19 +2542,13 @@ func (w *World) recordStrategyDeath(a *Agent, ttlExpiry bool) {
 	c.TTLExpiry++
 }
 
-// recordStrategyGoal bumps Win.NoFollow or Win.Following depending
-// on the agent's trustee status at goal-reach. Never touches
-// Die.TTL.
+// recordStrategyGoal bumps the strategy's Wins count on a goal-reach.
+// Never touches Die.TTL.
 func (w *World) recordStrategyGoal(a *Agent) {
 	if a.CurrentStrategy == 0 {
 		return
 	}
-	c := w.ensureStrategyPerf(a.CurrentStrategy)
-	if a.CurrentTrustee != 0 {
-		c.Following++
-	} else {
-		c.NoFollow++
-	}
+	w.ensureStrategyPerf(a.CurrentStrategy).Wins++
 }
 
 // ensureStrategyPerf returns the counter struct for `letter`,
@@ -2644,13 +2721,13 @@ func (w *World) updateStrategyTrust(a *Agent, success bool) {
 	}
 }
 
-// ScentMaxAge bounds how many cycles a deposited scent remains
-// perceptible. ScentFreshness decays linearly from 1.0 at deposit
-// time to 0.0 at this age. 1000 cycles ≈ 100 seconds of game time
-// at the 100ms tick rate — long enough for followers to pick up a
-// trail from across the maze, but still short enough that very
-// old paths don't permanently bias routing.
-const ScentMaxAge = 1000
+// ScentMaxAge is the lifetime of a scent trail, in cycles: a deposit
+// fades from full strength to nothing over this many cycles and is then
+// removed (no longer rendered or perceptible). Re-walking a cell
+// re-stamps its deposit cycle, which resets the lifetime — so an actively
+// used trail stays visible while an abandoned one disappears 50 cycles
+// after the last time it was set.
+const ScentMaxAge = 50
 
 // ScentFreshness returns the local scent intensity at (x, y) in
 // [0.0, 1.0]. 1.0 means a fresh deposit this very cycle; the value
@@ -2819,6 +2896,19 @@ func (m *Maze) IsCornerClipped(from, to Pos) bool {
 // InBounds reports whether (x, y) is inside the board.
 func InBounds(x, y int) bool {
 	return x >= 0 && x < BoardWidth && y >= 0 && y < BoardHeight
+}
+
+// newGrid allocates a BoardHeight×BoardWidth grid (row-major: g[y][x]) at
+// the board size currently in effect. The per-cell grids (maze cells,
+// scent, occupancy, distance tables) are slices rather than fixed arrays
+// so the board is runtime-sizable (see SetBoardSize); this is their one
+// allocation helper.
+func newGrid[T any]() [][]T {
+	g := make([][]T, BoardHeight)
+	for y := range g {
+		g[y] = make([]T, BoardWidth)
+	}
+	return g
 }
 
 // AbsInt returns |x|.

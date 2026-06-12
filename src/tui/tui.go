@@ -114,11 +114,13 @@ type Model struct {
 	ShowPath bool
 	build    WorldBuilder
 
-	// sim, when non-nil, owns the live world and advances it on a
-	// background goroutine (live app). All world access then goes
-	// through sim's lock. When nil (tests), the Model steps the world
+	// sim, when non-nil, is the execution backend that owns the live
+	// world and advances it on background goroutines (live app): the
+	// serial SimLoop or the worker-per-agent ParallelLoop. The Model
+	// only ever publishes view intent, posts commands, and reads
+	// frames through it. When nil (tests), the Model steps the world
 	// synchronously in Update — deterministic, single-goroutine.
-	sim *SimLoop
+	sim driver
 
 	// Terminal dims learned from tea.WindowSizeMsg; zero before the
 	// first resize event (e.g. unit tests that never send one). When
@@ -128,7 +130,25 @@ type Model struct {
 	// bump these by one cell; clamped to keep the viewport inside
 	// [0, BoardWidth] × [0, BoardHeight]. Reset to (0, 0) on reseed.
 	offsetX, offsetY int
+
+	// lastRightW caches the right-pane width from the most recent
+	// published frame (async mode only). Scroll clamping / paging need
+	// it to size the maze viewport, and in async mode the UI must not
+	// read the world to measure it — so it rides along on each frame and
+	// is refreshed on tick. Zero until the first frame; effectiveRightW
+	// falls back to defaultRightW until then.
+	lastRightW int
+
+	// paused: in sync (test) mode, gates the inline tick step. In async/
+	// live mode the driver owns the real pause state; this copy is only
+	// set when a frame is rendered (so the header can show "[PAUSED]").
+	paused bool
 }
+
+// defaultRightW is the assumed right-pane width before the first frame
+// arrives (async mode). Only affects scroll clamping for the brief pre-
+// frame window; corrected the moment a real frame is published.
+const defaultRightW = 40
 
 // NewModel constructs a SYNCHRONOUS Model: the world steps inline in
 // Update. Used by tests (deterministic, no goroutine). `builder` turns
@@ -147,7 +167,22 @@ func NewAsyncModel(seed int64, builder WorldBuilder) Model {
 		builder = world.NewWorld
 	}
 	w := builder(seed)
-	return Model{World: w, build: builder, sim: NewSimLoop(w, builder, tickInterval)}
+	sl := NewSimLoop(w, builder, tickInterval)
+	sl.togglePause() // start paused — agents wait for <space>
+	return Model{World: w, build: builder, sim: sl}
+}
+
+// NewParallelModel constructs a Model backed by a ParallelLoop — the live-
+// app mode where each agent runs on its own worker goroutine and the maze
+// is watched while they navigate it in parallel at their own rates.
+func NewParallelModel(seed int64, builder WorldBuilder) Model {
+	if builder == nil {
+		builder = world.NewWorld
+	}
+	w := builder(seed)
+	pl := NewParallelLoop(w)
+	pl.togglePause() // start paused — agents wait for <space>
+	return Model{World: w, build: builder, sim: pl}
 }
 
 // Init returns the first repaint command, and (async mode) starts the
@@ -160,80 +195,96 @@ func (m Model) Init() tea.Cmd {
 	return tickEvery(tickInterval)
 }
 
-// Update handles keyboard / tick messages. In async mode all world
-// access is serialized through the SimLoop's lock; in sync mode it's
-// direct (single goroutine).
+// Update handles keyboard / tick messages. In sync (test) mode the world
+// is stepped and mutated inline on this one goroutine. In async mode the
+// UI never touches the world: it publishes its view intent and posts any
+// world mutation to the SimLoop, which applies it on the sim goroutine.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.termW = msg.Width
 		m.termH = msg.Height
-		// clampOffsets reads the world (right-pane width), so take the
-		// read lock in async mode.
-		m.withWorldRead(func() { m.clampOffsets() })
+		m.clampOffsets()
+		m.publishView()
 		return m, nil
 	case tea.KeyMsg:
-		if s := msg.String(); s == "q" || s == "ctrl+c" {
+		s := msg.String()
+		if s == "q" || s == "ctrl+c" {
 			if m.sim != nil {
 				m.sim.Stop()
 			}
 			return m, tea.Quit
 		}
-		// keySwitch both reads (scroll sizing) and mutates (toggles /
-		// reseed) the world, so run it under the write lock in async
-		// mode; the lock also adopts a UI-driven reseed's new world.
-		m.withWorldWrite(func() { m.keySwitch(msg.String()) })
+		if s == " " || s == "space" {
+			// Space toggles play/pause. The driver owns the real pause
+			// state in live mode; sync (test) mode gates its inline step.
+			if m.sim != nil {
+				m.sim.togglePause()
+			} else {
+				m.paused = !m.paused
+			}
+			return m, nil
+		}
+		if m.sim == nil {
+			m.keySwitch(s) // sync: mutate the world directly
+		} else {
+			m.handleKeyAsync(s) // async: local view state + posted commands
+			m.publishView()
+		}
 		return m, nil
 	case tickMsg:
 		if m.sim == nil {
-			// Synchronous (test) mode: step inline, auto-reseed on solve.
-			m.World.Step()
-			if m.World.MazeSolved() {
-				_, _ = m.World.WriteStatsLog(StatsDir)
-				m.reseedPreservingLearning()
+			// Synchronous (test) mode: step inline (unless paused),
+			// auto-reseed on solve.
+			if !m.paused {
+				m.World.Step()
+				if m.World.MazeSolved() {
+					_, _ = m.World.WriteStatsLog(StatsDir)
+					m.reseedPreservingLearning()
+				}
 			}
 			return m, tickEvery(tickInterval)
 		}
-		// Async mode: the SimLoop goroutine advances the world; this
-		// tick only re-arms the repaint.
+		// Async mode: the backend advances the world. If it has solved the
+		// maze, auto-reseed (same as pressing 'r') — the parallel engine
+		// can't reseed itself from inside its barrier, so the UI drives it.
+		if m.sim.needsReseed() {
+			m.offsetX, m.offsetY = 0, 0
+			m.sim.reseed(m.build)
+		}
+		// Refresh the cached right-pane width from the latest frame (so
+		// scroll clamping/paging stays accurate without reading the world)
+		// and re-arm.
+		if f := m.sim.latestFrame(); f != nil {
+			m.lastRightW = f.rightW
+		}
 		return m, tickEvery(renderInterval)
 	}
 	return m, nil
 }
 
-// withWorldRead runs fn with m.World pointed at the live world under a
-// read lock (async), or directly (sync). For read-only world access
-// that may mutate Model UI state (offsets).
-func (m *Model) withWorldRead(fn func()) {
+// publishView hands the UI's current scroll/size/overlay intent to the
+// SimLoop so it renders the viewport the user is looking at. No-op in
+// sync mode (no SimLoop).
+func (m *Model) publishView() {
 	if m.sim == nil {
-		fn()
 		return
 	}
-	m.sim.mu.RLock()
-	defer m.sim.mu.RUnlock()
-	m.World = m.sim.world
-	fn()
+	m.sim.publishView(&viewState{
+		offsetX:  m.offsetX,
+		offsetY:  m.offsetY,
+		termW:    m.termW,
+		termH:    m.termH,
+		showPath: m.ShowPath,
+	})
 }
 
-// withWorldWrite runs fn under the write lock with m.World pointed at
-// the live world, then publishes m.World back to the loop so a reseed
-// performed inside fn swaps the live world atomically.
-func (m *Model) withWorldWrite(fn func()) {
-	if m.sim == nil {
-		fn()
-		return
-	}
-	m.sim.mu.Lock()
-	defer m.sim.mu.Unlock()
-	m.World = m.sim.world
-	fn()
-	m.sim.world = m.World
-}
-
-// keySwitch applies a non-quit keypress: viewport scrolling, overlay /
-// hazard / agent toggles, and reseed. Mutates m (offsets, ShowPath)
-// and m.World; callers handle any locking.
-func (m *Model) keySwitch(s string) {
+// applyViewKey handles the UI-local keys — viewport scrolling/paging and
+// the shortest-path overlay toggle — that mutate only Model display
+// state, never the world. Returns true if the key was a view key. Shared
+// by sync (keySwitch) and async (handleKeyAsync) so the two paths can
+// never diverge on scrolling behavior.
+func (m *Model) applyViewKey(s string) bool {
 	switch s {
 	case "up":
 		m.offsetY--
@@ -267,16 +318,58 @@ func (m *Model) keySwitch(s string) {
 		viewW, _ := m.currentViewSize()
 		m.offsetX += viewW
 		m.clampOffsets()
-	case "r":
-		m.reseedPreservingLearning()
 	case "s":
 		m.ShowPath = !m.ShowPath
+	default:
+		return false
+	}
+	return true
+}
+
+// keySwitch applies a non-quit keypress in SYNC mode: view keys via
+// applyViewKey, then world-mutating keys (reseed / TTL / agent toggles)
+// directly on m.World (single goroutine, no lock).
+func (m *Model) keySwitch(s string) {
+	if m.applyViewKey(s) {
+		return
+	}
+	switch s {
+	case "r":
+		m.reseedPreservingLearning()
 	case "t":
 		m.World.TTLDisabled = !m.World.TTLDisabled
 	case "1", "2", "3", "4", "5":
 		if a := m.World.AgentByLabel(rune(s[0])); a != nil {
 			a.Disabled = !a.Disabled
 		}
+	}
+}
+
+// handleKeyAsync applies a non-quit keypress in ASYNC mode: view keys
+// update local Model state; world-mutating keys are posted to the
+// SimLoop as commands so the world is only ever touched on the sim
+// goroutine. Reseed also resets the UI's scroll offset (display state).
+func (m *Model) handleKeyAsync(s string) {
+	if m.applyViewKey(s) {
+		return
+	}
+	switch s {
+	case "r":
+		m.offsetX, m.offsetY = 0, 0
+		m.sim.reseed(m.build)
+	case "t":
+		m.sim.post(func(w *world.World) *world.World {
+			w.TTLDisabled = !w.TTLDisabled
+			return nil
+		})
+	case "1", "2", "3", "4", "5":
+		label := rune(s[0])
+		m.sim.post(func(w *world.World) *world.World {
+			if a := w.AgentByLabel(label); a != nil {
+				a.Disabled = !a.Disabled
+			}
+			return nil
+		})
 	}
 }
 
@@ -334,24 +427,35 @@ func reseedWorldPreservingLearning(prev *world.World, build WorldBuilder) *world
 // into a single frame. Only the maze pane scrolls; the others are
 // pure projections of world state.
 func (m Model) View() string {
-	// Async mode: stat panes come from the decoupled aggregator (no
-	// world access on the render path); only the maze viewport reads
-	// the live world, briefly, under the read lock.
+	// Async mode: display the most recently published frame, composed
+	// entirely by the sim goroutine. The UI never touches the world here
+	// — no lock, and a slow Step() can't stall the repaint.
 	if m.sim != nil {
-		if frame := m.sim.stats.Latest(); frame != nil {
-			m.sim.mu.RLock()
-			m.World = m.sim.world
-			mazeW, mazeH := m.mazeViewSize(paneWidth(frame.right()))
-			maze := m.renderMazePane(mazeW, mazeH)
-			m.sim.mu.RUnlock()
-			body := lipgloss.JoinHorizontal(lipgloss.Top, maze, "  ", frame.right())
-			return lipgloss.JoinVertical(lipgloss.Left, frame.header, body, frame.bottom)
+		if f := m.sim.latestFrame(); f != nil {
+			return f.text
 		}
-		// Before the first published frame: render everything live.
-		m.sim.mu.RLock()
-		defer m.sim.mu.RUnlock()
-		m.World = m.sim.world
+		return startingView() // before the first frame / terminal size
 	}
+	// Sync (test) mode: render live on this single goroutine.
+	screen, _ := m.composeScreen()
+	return screen
+}
+
+// startingView is the placeholder shown in async mode until the sim has
+// published its first frame (i.e. until the UI has reported a terminal
+// size). Kept minimal so it costs nothing to render repeatedly.
+func startingView() string {
+	return titleStyle.Render("Maze of Wumpus") + "\n\nstarting…"
+}
+
+// composeScreen renders the full TUI — header, maze viewport, right pane,
+// bottom pane — from m's world and viewport state, returning the screen
+// text and the measured right-pane width. It is the single source of
+// truth for layout: sync mode calls it directly in View, and the sim
+// goroutine calls it (via a throwaway Model) to produce published
+// frames. The rightW return rides along on the frame so the async UI can
+// size/clamp its viewport without reading the world.
+func (m Model) composeScreen() (string, int) {
 	right := m.renderRightPane()
 	rightW := paneWidth(right)
 	mazeW, mazeH := m.mazeViewSize(rightW)
@@ -360,11 +464,12 @@ func (m Model) View() string {
 		"  ",
 		right,
 	)
-	return lipgloss.JoinVertical(lipgloss.Left,
+	screen := lipgloss.JoinVertical(lipgloss.Left,
 		m.renderHeader(),
 		body,
 		m.renderBottomPane(),
 	)
+	return screen, rightW
 }
 
 // renderHeader is the top line: title, GOALS banner (when any agent
@@ -372,6 +477,10 @@ func (m Model) View() string {
 func (m Model) renderHeader() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("Maze of Wumpus"))
+	if m.paused {
+		b.WriteString("  ")
+		b.WriteString(ttlWarnStyle.Render("[PAUSED — press space to play]"))
+	}
 	totalGoals := 0
 	for _, a := range m.World.Agents {
 		totalGoals += a.Stats.GoalsReached
@@ -437,7 +546,7 @@ func (m Model) renderBottomPane() string {
 		ttlState = "OFF"
 	}
 	b.WriteString(statStyle.Render(
-		fmt.Sprintf("Cycle %5d | Paths: %s | ttl:%s\n[q]uit [r]eseed [s]how-path [t]tl [↑↓←→] scroll [pgup/pgdn,⇧←→] page [1..9 a..c] agent",
+		fmt.Sprintf("Cycle %5d | Paths: %s | ttl:%s\n[space] play/pause [q]uit [r]eseed [s]how-path [t]tl [↑↓←→] scroll [pgup/pgdn,⇧←→] page [1..9 a..c] agent",
 			m.World.Cycle,
 			pathsStr, ttlState),
 	))
@@ -491,8 +600,22 @@ func (m Model) mazeViewSize(rightW int) (w, h int) {
 // measurement + mazeViewSize so the arrow-key handlers and
 // clampOffsets share one source of truth for "how big is a page."
 func (m Model) currentViewSize() (int, int) {
-	rightW := paneWidth(m.renderRightPane())
-	return m.mazeViewSize(rightW)
+	return m.mazeViewSize(m.effectiveRightW())
+}
+
+// effectiveRightW reports the right-pane width used to size the maze
+// viewport. Sync mode measures it live from the world. Async mode must
+// not read the world from the UI goroutine, so it uses the width carried
+// on the latest frame (cached as lastRightW), falling back to
+// defaultRightW until the first frame lands.
+func (m Model) effectiveRightW() int {
+	if m.sim != nil {
+		if m.lastRightW > 0 {
+			return m.lastRightW
+		}
+		return defaultRightW
+	}
+	return paneWidth(m.renderRightPane())
 }
 
 // clampOffsets keeps (offsetX, offsetY) within
@@ -566,15 +689,41 @@ func distSeverity(actual, ttl int) int {
 	}
 }
 
+// lastScoreTier classifies the most recent solve SCORE against the
+// agent's running min/avg/max — higher is better (the inverse of
+// lastSolveTier's time semantics):
+//
+//	0 = green   (≥ max — best or tied-best)
+//	1 = yellow  (≥ avg)
+//	2 = orange  (≥ min)
+//	3 = red     (< min)
+//
+// Returns -1 when the agent has not solved yet (solves == 0).
+func lastScoreTier(last, min, avg, max float64, solves int) int {
+	if solves <= 0 {
+		return -1
+	}
+	switch {
+	case last >= max:
+		return 0
+	case last >= avg:
+		return 1
+	case last >= min:
+		return 2
+	default:
+		return 3
+	}
+}
+
 func (m Model) formatAgentStats(a *world.Agent) string {
 	alive := "alive   "
 	if !a.Alive {
 		alive = "dead    "
 	}
-	// Per-agent TTL ceiling = TTLMultiplier × the agent's own
-	// EntrancePos→GoalPos shortest path. Used both for the dist
-	// color-severity heuristic and as a printed column.
-	agentTTL := world.TTLMultiplier * a.OptimalDistance
+	// Per-agent TTL ceiling: the agent's best solve distance once it has
+	// reached the goal, else the exploration window. Drives the dist
+	// color-severity heuristic and the printed TTL: column.
+	agentTTL := m.World.TTLCeiling(a)
 	distText := fmt.Sprintf("dist:%04d", a.Stats.ActualDistance)
 	switch distSeverity(a.Stats.ActualDistance, agentTTL) {
 	case 2:
@@ -583,39 +732,36 @@ func (m Model) formatAgentStats(a *world.Agent) string {
 		distText = ttlWarnStyle.Render(distText)
 	}
 	agentTTLText := fmt.Sprintf("TTL:%04d", agentTTL)
-	lastText := fmt.Sprintf("%04d", a.Stats.LastSolveTime)
-	switch lastSolveTier(a.Stats.LastSolveTime, a.Stats.MinSolveTime,
-		int(a.Stats.AvgSolveTime), a.Stats.MaxSolveTime) {
+	// Most-recent solve score, colored by its rank vs the running
+	// min/avg/max (higher is better).
+	lastScoreText := fmt.Sprintf("%.3f", a.Stats.LastScore)
+	switch lastScoreTier(a.Stats.LastScore, a.Stats.MinScore,
+		a.Stats.AvgScore, a.Stats.MaxScore, a.Stats.GoalsReached) {
 	case 0:
-		lastText = solveGreen.Render(lastText)
+		lastScoreText = solveGreen.Render(lastScoreText)
 	case 1:
-		lastText = solveYellow.Render(lastText)
+		lastScoreText = solveYellow.Render(lastScoreText)
 	case 2:
-		lastText = solveOrange.Render(lastText)
+		lastScoreText = solveOrange.Render(lastScoreText)
 	case 3:
-		lastText = solveRed.Render(lastText)
-	}
-	following := "-"
-	if a.CurrentTrustee != 0 {
-		following = string(a.CurrentTrustee)
+		lastScoreText = solveRed.Render(lastScoreText)
 	}
 	strLetter := "-"
 	if a.CurrentStrategy != 0 {
 		strLetter = string(a.CurrentStrategy)
 	}
-	learnedTTL := "----"
-	if a.LearnedTTL > 0 {
-		learnedTTL = fmt.Sprintf("%04d", a.LearnedTTL)
-	}
+	// s = starts (#runs), f = fails (deaths), g = goals. All three reset
+	// to 0 on a fresh maze (reseed builds new agents), so a new map starts
+	// the f column at 0 as expected.
 	return fmt.Sprintf(
-		" %c %s str:%s s:%03d f:%s ttl:%s d:%03d g:%03d %s %s best:%04d/%04d t[min/avg/max/last]:%04d/%07.1f/%04d/%s score:%.5f",
+		" %c %s str:%s s:%03d f:%03d g:%03d %s rt:%04.0f %s best:%04d/%04d s[min/avg/max/last]:%.3f/%.3f/%.3f/%s score:%.3f",
 		a.Label, alive, strLetter,
-		a.Stats.Starts, following, learnedTTL,
-		a.Stats.Deaths, a.Stats.GoalsReached,
-		distText, agentTTLText,
+		a.Stats.Starts, a.Stats.Deaths,
+		a.Stats.GoalsReached,
+		distText, a.StepsPerSec, agentTTLText,
 		a.Stats.BestSolveDistance, a.Stats.BestSolveTime,
-		a.Stats.MinSolveTime, a.Stats.AvgSolveTime, a.Stats.MaxSolveTime, lastText,
-		a.Stats.Score(m.World.Cycle),
+		a.Stats.MinScore, a.Stats.AvgScore, a.Stats.MaxScore, lastScoreText,
+		a.Stats.Score(a.OptimalDistance),
 	)
 }
 
@@ -724,8 +870,11 @@ func (m Model) glyphAt(w *world.World, x, y int) string {
 		}
 		return entranceGlyph
 	}
+	// Scent trails render only while still within their lifetime — a
+	// deposit older than ScentMaxAge cycles has been "removed" and the
+	// cell renders as plain path. Re-walking the cell resets its age.
 	switch {
-	case w.ScentOwner[y][x] != 0:
+	case w.ScentOwner[y][x] != 0 && w.ScentFreshness(x, y) > 0:
 		switch w.ScentOwner[y][x] {
 		case '1':
 			return scent1Glyph

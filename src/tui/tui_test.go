@@ -204,25 +204,20 @@ func TestFormatAgentStats_HasStartsColumn(t *testing.T) {
 	}
 }
 
-// TestFormatAgentStats_HasFollowingColumn: the new f:<trustee>
-// column renders the agent's CurrentTrustee for followers (4-7)
-// and a dash for leaders (1-3) or any agent that hasn't picked yet.
-func TestFormatAgentStats_HasFollowingColumn(t *testing.T) {
+// TestFormatAgentStats_FailsColumn: the f: column is the agent's fail
+// (death) count — 0 on a fresh agent, and reflecting Stats.Deaths
+// otherwise. (It is NOT the trustee: scent following was removed.)
+func TestFormatAgentStats_FailsColumn(t *testing.T) {
 	m := newTestModel(1)
-	follower := m.World.AgentByLabel('4')
-	follower.Alive = true
-	follower.CurrentTrustee = '2'
-	out := m.formatAgentStats(follower)
-	if !strings.Contains(out, "f:2") {
-		t.Errorf("follower row missing 'f:2': %q", out)
+	a := m.World.AgentByLabel('4')
+	a.Alive = true
+	a.Stats.Deaths = 0
+	if out := m.formatAgentStats(a); !strings.Contains(out, "f:000") {
+		t.Errorf("fresh agent should show f:000, got %q", out)
 	}
-
-	leader := m.World.AgentByLabel('1')
-	leader.Alive = true
-	leader.CurrentTrustee = 0
-	out = m.formatAgentStats(leader)
-	if !strings.Contains(out, "f:-") {
-		t.Errorf("leader row missing 'f:-': %q", out)
+	a.Stats.Deaths = 7
+	if out := m.formatAgentStats(a); !strings.Contains(out, "f:007") {
+		t.Errorf("agent with 7 deaths should show f:007, got %q", out)
 	}
 }
 
@@ -336,6 +331,10 @@ func TestGlyphAt_AllCellTypes(t *testing.T) {
 		t.Error("entrance glyph mismatch")
 	}
 	w.Maze.Cells[5][5] = world.CellPath
+	// Stamp a fresh deposit so the trail is within its lifetime (a stale
+	// deposit now renders as plain path).
+	w.Cycle = 1
+	w.ScentCycle[5][5] = 1
 	w.ScentOwner[5][5] = '1'
 	if m.glyphAt(w, 5, 5) != scent1Glyph {
 		t.Error("scent A glyph mismatch")
@@ -638,5 +637,32 @@ func TestTickEvery(t *testing.T) {
 	}
 	if _, ok := cmd().(tickMsg); !ok {
 		t.Error("tickEvery cmd did not produce tickMsg")
+	}
+}
+
+// TestGlyphAt_ScentExpiresAfterLifetime: a scent trail renders while fresh
+// but is removed (renders as plain path) once older than ScentMaxAge
+// cycles; re-walking the cell resets its lifetime.
+func TestGlyphAt_ScentExpiresAfterLifetime(t *testing.T) {
+	m := newTestModel(1)
+	w := m.World
+	x, y := 5, 5
+	w.Maze.Cells[y][x] = world.CellPath
+	w.ScentOwner[y][x] = '1'
+
+	w.Cycle = 10
+	w.ScentCycle[y][x] = 10 // fresh deposit this cycle
+	if m.glyphAt(w, x, y) != scent1Glyph {
+		t.Error("fresh scent should render the scent glyph")
+	}
+
+	w.Cycle = 10 + world.ScentMaxAge // aged out
+	if m.glyphAt(w, x, y) != pathGlyph {
+		t.Error("expired scent should render as plain path (removed)")
+	}
+
+	w.ScentCycle[y][x] = w.Cycle // re-walked → lifetime reset
+	if m.glyphAt(w, x, y) != scent1Glyph {
+		t.Error("refreshed scent should render again")
 	}
 }

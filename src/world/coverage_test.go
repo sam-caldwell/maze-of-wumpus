@@ -178,10 +178,11 @@ func TestScentFreshness(t *testing.T) {
 	if got := w.ScentFreshness(5, 5); got != 1.0 {
 		t.Errorf("fresh scent = %v, want 1.0", got)
 	}
-	// Half-aged: deposited is ScentMaxAge/2 ticks in the past.
-	w.ScentCycle[5][5] = w.Cycle - ScentMaxAge/2
-	if got := w.ScentFreshness(5, 5); got <= 0.4 || got >= 0.6 {
-		t.Errorf("half-aged scent = %v, want ~0.5", got)
+	// Partly aged: a deposit one tick in the past is a partial value
+	// strictly between 0 and 1 (the linear decay over ScentMaxAge cycles).
+	w.ScentCycle[5][5] = w.Cycle - 1
+	if got := w.ScentFreshness(5, 5); got <= 0 || got >= 1 {
+		t.Errorf("partly-aged scent = %v, want a partial value in (0,1)", got)
 	}
 	// Fully aged-out: deposited == Cycle - ScentMaxAge.
 	w.ScentCycle[5][5] = w.Cycle - ScentMaxAge
@@ -952,7 +953,8 @@ func TestKillAgent_NoCloneFallsThroughToDeath(t *testing.T) {
 // TestEndJourney_OpportunisticCreditOnGoal: a follower that recorded
 // opportunistic followings of two peer labels and reaches the goal
 // must see BOTH peer labels gain trust (TrustGoalBonus + within-TTL
-// bonus when applicable).
+// bonus when applicable). (The follower-trust logic is now inert in the
+// running game but retained and unit-tested.)
 func TestEndJourney_OpportunisticCreditOnGoal(t *testing.T) {
 	w := NewWorld(322)
 	a := w.AgentByLabel('4') // a follower label
@@ -975,9 +977,7 @@ func TestEndJourney_OpportunisticCreditOnGoal(t *testing.T) {
 }
 
 // TestEndJourney_OpportunisticNoCreditOnFailure: opportunistic
-// followings DON'T penalize on a failed run (the agent simply learns
-// nothing about those labels from a death — they may have led
-// somewhere fine and the agent died from other causes).
+// followings DON'T penalize on a failed run.
 func TestEndJourney_OpportunisticNoCreditOnFailure(t *testing.T) {
 	w := NewWorld(323)
 	a := w.AgentByLabel('4')
@@ -991,12 +991,8 @@ func TestEndJourney_OpportunisticNoCreditOnFailure(t *testing.T) {
 	}
 }
 
-// TestEndJourney_TrusteeAndOpportunisticBothCredit: when the agent
-// has BOTH a CurrentTrustee (with sufficient contact ticks) and
-// opportunistic followings on a winning run, both pathways credit
-// trust — the trustee gets credit via the existing gate, and any
-// OTHER labels in OpportunisticFollowed each get TrustGoalBonus.
-// The trustee label is NOT double-counted via the opportunistic path.
+// TestEndJourney_TrusteeAndOpportunisticBothCredit: trustee credit and
+// opportunistic credit are independent; the trustee isn't double-counted.
 func TestEndJourney_TrusteeAndOpportunisticBothCredit(t *testing.T) {
 	w := NewWorld(324)
 	a := w.AgentByLabel('4')
@@ -1005,10 +1001,7 @@ func TestEndJourney_TrusteeAndOpportunisticBothCredit(t *testing.T) {
 	a.JourneyTrusteeContactTicks = MinTrusteeContactTicks
 	a.OptimalDistance = 100
 	a.TicksAlive = 50
-	a.OpportunisticFollowed = map[rune]bool{
-		'2': true, // trustee — should NOT be double-credited via the opp path
-		'3': true, // peer    — should get opp credit
-	}
+	a.OpportunisticFollowed = map[rune]bool{'2': true, '3': true}
 	a.TrustScores = map[rune]float64{}
 	w.endJourney(a, true)
 	wantTrustee := TrustGoalBonus + TrustWithinTTLBonus

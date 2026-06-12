@@ -87,8 +87,9 @@ func pomcpStrategyPlan(w *world.World, a *world.Agent) world.Pos {
 	// number of values per strategy call regardless of how rollouts
 	// interleave.
 	seeds := make([]int64, len(candidates))
+	rng := w.AgentRng(a)
 	for i := range seeds {
-		seeds[i] = w.Rng.Int63()
+		seeds[i] = rng.Int63()
 	}
 	means := make([]float64, len(candidates))
 	var wg sync.WaitGroup
@@ -199,28 +200,11 @@ func pomcpSampleNext(w *world.World, a *world.Agent, pos world.Pos, rng *rand.Ra
 			distFromStart = d
 		}
 		// Outward bias: weight = 1 + distFromStart. +1 so neighbors at
-		// distance 0 (the entrance) still get nonzero weight.
+		// distance 0 (the entrance) still get nonzero weight. (The scent
+		// channel has been dropped: rollouts no longer bias toward a
+		// trustee's trail — POMCP explores purely on its own outward
+		// gradient.)
 		wt := float64(1 + distFromStart)
-		// Scent shaping: uses a.CurrentTrustee (the per-journey
-		// picked attract label) — every rollout step inside the
-		// same journey is consistent with the agent's "who do I
-		// follow this run" decision. Labels with negative
-		// TrustScores act as dynamic repel.
-		if world.IsScentFollower(a.Label) {
-			owner := w.ScentOwner[np.Y][np.X]
-			freshness := w.ScentFreshness(np.X, np.Y)
-			if freshness > 0 && owner != 0 {
-				switch {
-				case a.CurrentTrustee != 0 && owner == a.CurrentTrustee:
-					wt *= 1 + freshness
-				case a.TrustScores != nil && a.TrustScores[owner] < 0:
-					wt *= 1 - freshness
-					if wt < 0 {
-						wt = 0
-					}
-				}
-			}
-		}
 		if wt <= 0 {
 			continue
 		}

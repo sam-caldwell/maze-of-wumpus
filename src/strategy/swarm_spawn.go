@@ -171,15 +171,14 @@ func regionViable(a *world.Agent, np world.Pos) bool {
 // first. (Saturation still forks toward every viable direction when
 // slots allow; this only decides priority.)
 func regionScore(w *world.World, a *world.Agent, np world.Pos) float64 {
-	// POMCP uses outward distance as a cheap, allocation-free proxy
-	// here; per-direction rollouts would be costly at fork time.
-	// Default (QMDP and fallbacks): prefer farther-from-entrance,
-	// scent-positive gateways — the swarm's outward exploration bias.
+	// Prefer farther-from-entrance gateways — the swarm's outward
+	// exploration bias. (Scent dropped: ordering is purely by distance
+	// from the entrance now.)
 	explore := 0.0
 	if d := a.DistFromStart[np.Y][np.X]; d > 0 {
 		explore = float64(d)
 	}
-	return explore + qmdpScentWeight*w.ScentSignedFreshness(a, np.X, np.Y)
+	return explore
 }
 
 // occupiedSectors marks the directional sectors (relative to leaderPos)
@@ -298,8 +297,7 @@ func qmdpSpawnPolicy(w *world.World, a *world.Agent, branches []world.Pos, freeS
 		if d := a.DistFromStart[np.Y][np.X]; d > 0 {
 			explore = float64(d)
 		}
-		scent := w.ScentSignedFreshness(a, np.X, np.Y)
-		scores[i] = qmdpExploreWeight*explore + qmdpScentWeight*scent
+		scores[i] = qmdpExploreWeight * explore
 	}
 	return branchesWithinMargin(scores, branches, freeSlots)
 }
@@ -309,8 +307,9 @@ func qmdpSpawnPolicy(w *world.World, a *world.Agent, branches []world.Pos, freeS
 // promising possibilities.
 func pomcpSpawnPolicy(w *world.World, a *world.Agent, branches []world.Pos, freeSlots int) []world.Pos {
 	scores := make([]float64, len(branches))
+	src := w.AgentRng(a)
 	for i, np := range branches {
-		rng := rand.New(rand.NewSource(w.Rng.Int63()))
+		rng := rand.New(rand.NewSource(src.Int63()))
 		scores[i] = meanRolloutReturn(w, a, np, rng)
 	}
 	return branchesWithinMargin(scores, branches, freeSlots)
