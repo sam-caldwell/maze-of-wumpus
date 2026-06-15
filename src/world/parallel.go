@@ -161,6 +161,9 @@ func (w *World) stepGroupParallel(a *Agent) (terminal bool) {
 		a.PendingBonus += float64(curStartDist-a.MaxStartDist) * RealDistanceShaping
 		a.MaxStartDist = curStartDist
 	}
+	if curStartDist > a.Stats.MaxReach {
+		a.Stats.MaxReach = curStartDist // persists across lives; funds TTL commute credit
+	}
 	walkables := 0
 	for _, dd := range Cardinals {
 		np := Pos{a.Pos.X + dd.X, a.Pos.Y + dd.Y}

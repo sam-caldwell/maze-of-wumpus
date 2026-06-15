@@ -774,7 +774,7 @@ func TestSwarmLeaderStartsSolo_NoStartedBump(t *testing.T) {
 // Joining assigns the group and starts solo.
 func TestSwarmCloneSpawn_QmdpSwarmLetterV(t *testing.T) {
 	w := NewWorld(317)
-	a := w.AgentByLabel('5')
+	a := w.AgentByLabel('4')
 	a.CurrentStrategy = QmdpSwarmStrategyLetter
 	a.SwarmGroupID = 0
 	a.SwarmClones = nil
@@ -792,7 +792,7 @@ func TestSwarmCloneSpawn_QmdpSwarmLetterV(t *testing.T) {
 // all-but-R swarm model.
 func TestMaintainSwarmMembership_AllNonRLettersSwarm(t *testing.T) {
 	w := NewWorld(319)
-	for _, letter := range []rune{'S', 'T', 'U', 'V', 'W', 'X'} {
+	for _, letter := range []rune{'S', 'Y', 'U', 'V', 'W', 'X'} {
 		a := w.AgentByLabel('3')
 		a.SwarmGroupID = 0
 		a.SwarmClones = nil
@@ -831,7 +831,7 @@ func TestMaintainSwarmMembership_RNeverSwarms(t *testing.T) {
 // no real death) — the same generic promotion path S uses.
 func TestSwarmLeaderPromotion_LetterV(t *testing.T) {
 	w := NewWorld(318)
-	a := SpawnAgentForTest(w, '5')
+	a := SpawnAgentForTest(w, '4')
 	a.CurrentStrategy = QmdpSwarmStrategyLetter
 	a.SwarmGroupID = 0
 	w.maintainSwarmMembership(a)
@@ -1115,7 +1115,7 @@ func TestSwarmIndependentGraphs(t *testing.T) {
 func TestStrategyPerf_StartedCountsAllRuns(t *testing.T) {
 	w := NewWorldWithConfig(Config{
 		Seed:            300,
-		StrategyLetters: []rune{'R', 'T', 'X'},
+		StrategyLetters: []rune{'R', 'U', 'X'},
 	})
 	a := w.AgentByLabel('1')
 	a.Disabled = false
@@ -1149,7 +1149,7 @@ func TestStrategyPerf_StartedCountsAllRuns(t *testing.T) {
 func TestStrategyPerf_StartedIncrementedRegardlessOfOutcome(t *testing.T) {
 	w := NewWorldWithConfig(Config{
 		Seed:            301,
-		StrategyLetters: []rune{'T'},
+		StrategyLetters: []rune{'U'},
 	})
 	a := w.AgentByLabel('3')
 	a.Disabled = false

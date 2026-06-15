@@ -28,7 +28,7 @@ func TestIsScentFollower(t *testing.T) {
 // uniform default smell/sight radii across the roster.
 func TestAgentPerceptionDefaults(t *testing.T) {
 	w := NewWorld(310)
-	for _, l := range []rune{'1', '2', '3', '4', '5'} {
+	for _, l := range []rune{'1', '2', '3', '4'} {
 		a := w.AgentByLabel(l)
 		if a == nil {
 			t.Fatalf("missing agent %c", l)
@@ -88,12 +88,14 @@ func TestMarkAgentSensed_SightRadius2OpenArea(t *testing.T) {
 // nothing outside the wall ring should be perceived.
 func TestMarkAgentSensed_DefaultRadius_FillsWalledRegion(t *testing.T) {
 	w := NewWorld(314)
-	// Wall ring at (35..66) × (35..66); 30×30 open interior at
-	// (36..65) × (36..65). Wall everything in between path cells
-	// so the BFS can't escape via the surrounding generated maze.
-	for y := 35; y <= 66; y++ {
-		for x := 35; x <= 66; x++ {
-			if y == 35 || y == 66 || x == 35 || x == 66 {
+	// Wall ring at (44..56) × (44..56); 11×11 open interior at
+	// (45..55) × (45..55). The interior is fully inside the default
+	// sight radius (10) of the centre (50,50) — its farthest corner is
+	// Moore-distance 5 — so a correct BFS fills the whole enclosed box
+	// and the surrounding wall ring can't be escaped.
+	for y := 44; y <= 56; y++ {
+		for x := 44; x <= 56; x++ {
+			if y == 44 || y == 56 || x == 44 || x == 56 {
 				w.Maze.Cells[y][x] = CellWall
 			} else {
 				w.Maze.Cells[y][x] = CellPath
@@ -102,16 +104,16 @@ func TestMarkAgentSensed_DefaultRadius_FillsWalledRegion(t *testing.T) {
 	}
 	a := &Agent{Label: '3', Pos: Pos{X: 50, Y: 50}, SightRadius: DefaultSightRadius}
 	w.MarkAgentSensed(a)
-	// Every cell in the 32×32 (interior + wall ring) must be known:
-	//   30×30 = 900 paths + (32×32 − 30×30) = 124 walls = 1024 cells
-	want := 32 * 32
+	// Every cell in the 13×13 box (11×11 interior paths + the wall ring,
+	// each ring cell Moore-adjacent to a perceived path cell) is known.
+	want := 13 * 13
 	if got := len(a.KnownCells); got != want {
 		t.Errorf("walled region: KnownCells = %d, want %d", got, want)
 	}
 	// Nothing OUTSIDE the wall ring should be perceived (boundary
 	// rule only marks Moore-neighbors of perceived path cells; the
 	// wall ring cells aren't path cells, so they don't extend).
-	outsidePos := Pos{X: 34, Y: 34}
+	outsidePos := Pos{X: 43, Y: 43}
 	if a.KnownCells[outsidePos] {
 		t.Errorf("cell %v outside wall ring should NOT be perceived", outsidePos)
 	}
@@ -174,23 +176,13 @@ func TestMarkAgentSensed_SightWallBlocks(t *testing.T) {
 
 // TestScentPeerLabels: returns the follower set minus self.
 func TestScentPeerLabels(t *testing.T) {
-	got := ScentPeerLabels('5')
+	got := ScentPeerLabels('4')
 	if len(got) != len(ScentFollowerLabels)-1 {
 		t.Fatalf("len=%d, want %d", len(got), len(ScentFollowerLabels)-1)
 	}
 	for _, r := range got {
-		if r == '5' {
-			t.Errorf("self '5' appeared in peer list")
-		}
-	}
-	// Spot-check: peer list should include the other follower(s).
-	have := map[rune]bool{}
-	for _, r := range got {
-		have[r] = true
-	}
-	for _, l := range []rune{'4'} {
-		if !have[l] {
-			t.Errorf("peer list missing %c", l)
+		if r == '4' {
+			t.Errorf("self '4' appeared in peer list")
 		}
 	}
 }
@@ -309,7 +301,7 @@ func TestApplyScentShaping_AggregatesAcrossSensed(t *testing.T) {
 // TestScentMagnitudeFor_DefaultsToOne: every follower uses the
 // baseline 1.0 multiplier.
 func TestScentMagnitudeFor_DefaultsToOne(t *testing.T) {
-	for _, l := range []rune{'4', '5'} {
+	for _, l := range []rune{'3', '4'} {
 		if got := ScentMagnitudeFor(l); got != 1.0 {
 			t.Errorf("ScentMagnitudeFor(%c) = %v, want 1.0", l, got)
 		}
@@ -382,7 +374,7 @@ func TestPickTrustee_Stage1_UniformOverLeaders(t *testing.T) {
 	reviveAllAgents(w)
 	a.Stats.Starts = 1 // stage 1
 	// Heavy trust skew should NOT influence stage-1 (random) pick.
-	a.TrustScores = map[rune]float64{'1': 100, '5': 100}
+	a.TrustScores = map[rune]float64{'1': 100, '4': 100}
 	counts := map[rune]int{}
 	for i := 0; i < 300; i++ {
 		a.PickTrustee(w, w.Rng)
@@ -427,10 +419,12 @@ func TestPickTrustee_Stage2_SoftmaxOverLeaders(t *testing.T) {
 	}
 }
 
-// TestPickTrustee_Stage3_HalfPeers: with Stats.Starts >
-// ScentRunsForPeerExpansion, picks split ~50/50 between the leader
-// pool (ScentLeaderLabels) and the peer pool (other followers).
-func TestPickTrustee_Stage3_HalfPeers(t *testing.T) {
+// TestPickTrustee_Stage3_FallsBackToLeaders: with Stats.Starts >
+// ScentRunsForPeerExpansion the agent would normally split 50/50
+// between the leader pool and the peer pool — but the roster now has
+// a single scent follower ('4'), so the peer pool is empty and every
+// stage-3 pick gracefully falls back to the leader pool.
+func TestPickTrustee_Stage3_FallsBackToLeaders(t *testing.T) {
 	w := NewWorld(403)
 	a := SpawnAgentForTest(w, '4')
 	reviveAllAgents(w)
@@ -439,12 +433,10 @@ func TestPickTrustee_Stage3_HalfPeers(t *testing.T) {
 	for _, l := range ScentLeaderLabels {
 		leaders[l] = true
 	}
-	peers := map[rune]bool{}
-	for _, l := range ScentPeerLabels('4') {
-		peers[l] = true
+	// Single follower → no peers to expand into.
+	if len(ScentPeerLabels('4')) != 0 {
+		t.Fatalf("expected empty peer pool, got %v", ScentPeerLabels('4'))
 	}
-	leaderCount := 0
-	peerCount := 0
 	for i := 0; i < 600; i++ {
 		a.TrustScores = nil
 		a.PickTrustee(w, w.Rng)
@@ -452,19 +444,10 @@ func TestPickTrustee_Stage3_HalfPeers(t *testing.T) {
 		case a.CurrentTrustee == '4':
 			t.Errorf("agent 4 picked itself as trustee")
 		case leaders[a.CurrentTrustee]:
-			leaderCount++
-		case peers[a.CurrentTrustee]:
-			peerCount++
+			// expected: leader fallback
 		default:
 			t.Errorf("unexpected trustee %c", a.CurrentTrustee)
 		}
-	}
-	// 50/50 split with 600 trials → expect ~300 each; allow 200-400.
-	if leaderCount < 200 || leaderCount > 400 {
-		t.Errorf("stage 3 leader picks = %d/600, want roughly 300", leaderCount)
-	}
-	if peerCount < 200 || peerCount > 400 {
-		t.Errorf("stage 3 peer picks = %d/600, want roughly 300", peerCount)
 	}
 }
 
@@ -518,7 +501,7 @@ func TestPickTrustee_SkipsDeadLeader(t *testing.T) {
 func TestPickStrategy_50_50_Mix(t *testing.T) {
 	w := NewWorld(450)
 	a := SpawnAgentForTest(w, '4')
-	letters := []rune{'R', 'S', 'T', 'U', 'V', 'W', 'X'}
+	letters := []rune{'R', 'S', 'Y', 'U', 'V', 'W', 'X'}
 	counts := map[rune]int{}
 	for i := 0; i < 700; i++ {
 		a.StrategyTrustScores = nil
@@ -541,7 +524,7 @@ func TestPickStrategy_50_50_Mix(t *testing.T) {
 func TestPickStrategy_TrustBiasFavorsHighScore(t *testing.T) {
 	w := NewWorld(451)
 	a := SpawnAgentForTest(w, '4')
-	letters := []rune{'R', 'S', 'T'}
+	letters := []rune{'R', 'S', 'U'}
 	a.StrategyTrustScores = map[rune]float64{'R': 10}
 	hits := 0
 	trials := 500
@@ -840,14 +823,14 @@ func TestOptimizeKnownPath_BroadcastsToSwarmPeers(t *testing.T) {
 	}
 	a := SpawnAgentForTest(w, '3')
 	b := SpawnAgentForTest(w, '4')
-	c := SpawnAgentForTest(w, '5')
+	c := SpawnAgentForTest(w, '2')
 	// SpawnAgentForTest kills any agent already at the entrance, so
 	// only the most recent spawn is alive. Manually revive all three
 	// for the swarm test.
 	a.Alive, b.Alive, c.Alive = true, true, true
 	a.CurrentStrategy = SwarmStrategyLetter
 	b.CurrentStrategy = SwarmStrategyLetter
-	c.CurrentStrategy = 'T' // NOT swarm
+	c.CurrentStrategy = BenchmarkStrategyLetter // R: not in a's S-swarm
 	a.KnownCells = map[Pos]bool{}
 	b.KnownCells = map[Pos]bool{}
 	c.KnownCells = map[Pos]bool{}
@@ -889,7 +872,7 @@ func TestOptimizeKnownPath_NoBroadcastWhenSolo(t *testing.T) {
 	a := SpawnAgentForTest(w, '3')
 	b := SpawnAgentForTest(w, '4')
 	a.Alive, b.Alive = true, true
-	a.CurrentStrategy = 'T' // plain Bayesian, not swarm
+	a.CurrentStrategy = BenchmarkStrategyLetter // R: the only non-swarm strategy → no broadcast
 	b.CurrentStrategy = SwarmStrategyLetter
 	for x := 5; x <= 9; x++ {
 		a.KnownCells[Pos{X: x, Y: 5}] = true
@@ -1022,19 +1005,19 @@ func TestGenerateMaze_OpenFieldVariantOccurs(t *testing.T) {
 }
 
 // TestEnforceBenchmarkSingleton_DemoteExtras: when 2+ alive agents
-// are on R, all but one get demoted to T. Trustee cleared (T is
-// scent-blind).
+// are on R, all but one get demoted to S (the swarm-Bayesian
+// strategy). Trustee cleared (S is scent-blind).
 func TestEnforceBenchmarkSingleton_DemoteExtras(t *testing.T) {
 	w := NewWorld(774)
 	for _, a := range w.Agents {
 		a.Alive = true
 		a.Disabled = false
-		a.CurrentStrategy = 'T'
+		a.CurrentStrategy = 'U'
 	}
 	// Force four agents onto R.
 	for _, l := range []rune{'1', '2', '3', '4'} {
 		w.AgentByLabel(l).CurrentStrategy = BenchmarkStrategyLetter
-		w.AgentByLabel(l).CurrentTrustee = '5'
+		w.AgentByLabel(l).CurrentTrustee = '4'
 	}
 	w.EnforceBenchmarkSingleton()
 	onR := 0
@@ -1046,17 +1029,25 @@ func TestEnforceBenchmarkSingleton_DemoteExtras(t *testing.T) {
 	if onR != MaxBenchmarkAgents {
 		t.Errorf("after enforcement, R-count = %d, want %d", onR, MaxBenchmarkAgents)
 	}
-	// Demoted agents must have their CurrentTrustee cleared.
-	for _, a := range w.Agents {
-		if a.Alive && a.CurrentStrategy == 'T' && a.CurrentTrustee != 0 {
-			// Was this one of our forced-R set?
-			for _, l := range []rune{'1', '2', '3', '4'} {
-				if a.Label == l {
-					t.Errorf("demoted agent %c retained trustee %c",
-						a.Label, a.CurrentTrustee)
-				}
-			}
+	// The 3 demoted agents must land on the swarm-Bayesian strategy S
+	// (the live non-omniscient Bayesian planner) with their trustee
+	// cleared — never a stale/deleted strategy letter.
+	demoted := 0
+	for _, l := range []rune{'1', '2', '3', '4'} {
+		a := w.AgentByLabel(l)
+		if a.CurrentStrategy == BenchmarkStrategyLetter {
+			continue // the one R kept
 		}
+		demoted++
+		if a.CurrentStrategy != SwarmStrategyLetter {
+			t.Errorf("demoted agent %c on %c, want S", a.Label, a.CurrentStrategy)
+		}
+		if a.CurrentTrustee != 0 {
+			t.Errorf("demoted agent %c retained trustee %c", a.Label, a.CurrentTrustee)
+		}
+	}
+	if demoted != 4-MaxBenchmarkAgents {
+		t.Errorf("demoted %d agents, want %d", demoted, 4-MaxBenchmarkAgents)
 	}
 }
 
@@ -1067,7 +1058,7 @@ func TestEnforceBenchmarkSingleton_NoOpForOne(t *testing.T) {
 	for _, a := range w.Agents {
 		a.Alive = true
 		a.Disabled = false
-		a.CurrentStrategy = 'T'
+		a.CurrentStrategy = 'U'
 	}
 	w.AgentByLabel('1').CurrentStrategy = BenchmarkStrategyLetter
 	w.EnforceBenchmarkSingleton()
@@ -1089,10 +1080,10 @@ func TestEnforceSwarmQuorum_IsNoOp(t *testing.T) {
 	for _, a := range w.Agents {
 		a.Alive = true
 		a.Disabled = false
-		a.CurrentStrategy = 'T'
+		a.CurrentStrategy = 'U'
 		a.CurrentTrustee = 0
 	}
-	w.AgentByLabel('5').CurrentStrategy = SwarmStrategyLetter
+	w.AgentByLabel('4').CurrentStrategy = SwarmStrategyLetter
 	w.EnforceSwarmQuorum()
 	onSwarm := 0
 	for _, a := range w.Agents {
@@ -1112,7 +1103,7 @@ func TestEnforceSwarmQuorum_NoOpWhenZeroOnSwarm(t *testing.T) {
 	for _, a := range w.Agents {
 		a.Alive = true
 		a.Disabled = false
-		a.CurrentStrategy = 'T'
+		a.CurrentStrategy = 'U'
 	}
 	w.EnforceSwarmQuorum()
 	for _, a := range w.Agents {
@@ -1130,9 +1121,9 @@ func TestEnforceSwarmQuorum_AlreadyQuorate(t *testing.T) {
 	for _, a := range w.Agents {
 		a.Alive = true
 		a.Disabled = false
-		a.CurrentStrategy = 'T'
+		a.CurrentStrategy = 'U'
 	}
-	swarm := []rune{'3', '4', '5'}
+	swarm := []rune{'2', '3', '4'}
 	for _, l := range swarm {
 		w.AgentByLabel(l).CurrentStrategy = SwarmStrategyLetter
 	}
@@ -1155,7 +1146,7 @@ func TestEnforceSwarmQuorum_DraftClearsTrustee(t *testing.T) {
 	for _, a := range w.Agents {
 		a.Alive = true
 		a.Disabled = false
-		a.CurrentStrategy = 'T'
+		a.CurrentStrategy = 'U'
 		a.CurrentTrustee = 0
 	}
 	// A scent-using follower that's currently on T with a trustee.
@@ -1163,7 +1154,7 @@ func TestEnforceSwarmQuorum_DraftClearsTrustee(t *testing.T) {
 	target.CurrentStrategy = 'U'
 	target.CurrentTrustee = '2'
 	// Set one agent to S so the quorum logic triggers.
-	w.AgentByLabel('5').CurrentStrategy = SwarmStrategyLetter
+	w.AgentByLabel('3').CurrentStrategy = SwarmStrategyLetter
 	w.EnforceSwarmQuorum()
 	// `target` may or may not have been drafted (depends on iteration
 	// order). If drafted, its trustee must be cleared.
@@ -1177,7 +1168,7 @@ func TestEnforceSwarmQuorum_DraftClearsTrustee(t *testing.T) {
 // strategy consults the scent channel — the predicate is false for every
 // letter.
 func TestStrategyUsesScent_AllFalse(t *testing.T) {
-	for _, l := range []rune{'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Z', 0} {
+	for _, l := range []rune{'R', 'S', 'Y', 'U', 'V', 'W', 'X', 'Z', 0} {
 		if StrategyUsesScent(l) {
 			t.Errorf("StrategyUsesScent(%c) = true, want false", l)
 		}
@@ -1190,19 +1181,19 @@ func TestStrategyUsesScent_AllFalse(t *testing.T) {
 // that never tried to follow.
 func TestRespawnAgents_NoTrusteeWhenStrategyBlind(t *testing.T) {
 	w := NewWorld(760)
-	// Force PickStrategy to deterministically return 'T' by
-	// providing only 'T' in the letter pool.
-	w.strategyLetters = []rune{'T'}
+	// Force PickStrategy to deterministically return U by
+	// providing only U in the letter pool.
+	w.strategyLetters = []rune{'U'}
 	a := w.AgentByLabel('4')
 	a.Disabled = false
 	a.Alive = false
 	a.RespawnIn = 0
 	w.RespawnAgents()
-	if a.CurrentStrategy != 'T' {
-		t.Fatalf("CurrentStrategy = %c, want T", a.CurrentStrategy)
+	if a.CurrentStrategy != 'U' {
+		t.Fatalf("CurrentStrategy = %c, want U", a.CurrentStrategy)
 	}
 	if a.CurrentTrustee != 0 {
-		t.Errorf("CurrentTrustee = %c, want 0 (strategy T can't sense scent)",
+		t.Errorf("CurrentTrustee = %c, want 0 (strategy U can't sense scent)",
 			a.CurrentTrustee)
 	}
 }
@@ -1301,12 +1292,12 @@ func TestKillAgent_RecordsRedEvent(t *testing.T) {
 // that the choice came from the TTL pool by re-rolling deterministic.
 func TestKillAgent_TTLEventUsesTTLTemplate(t *testing.T) {
 	w := NewWorld(721)
-	a := SpawnAgentForTest(w, '5')
+	a := SpawnAgentForTest(w, '4')
 	w.KillAgent(a, "ttl")
 	e := w.Events[len(w.Events)-1]
 	matched := false
 	for _, tmpl := range deathByTTL {
-		want := strings.ReplaceAll(tmpl, "%c", "5")
+		want := strings.ReplaceAll(tmpl, "%c", "4")
 		if e.Message == want {
 			matched = true
 			break
@@ -1620,8 +1611,8 @@ func TestWriteStatsLog_RoundTrip(t *testing.T) {
 	if rec.Seed != 292 {
 		t.Errorf("seed = %d, want 292", rec.Seed)
 	}
-	if len(rec.Agents) != 5 {
-		t.Errorf("agent rows = %d, want 5", len(rec.Agents))
+	if len(rec.Agents) != 4 {
+		t.Errorf("agent rows = %d, want 4", len(rec.Agents))
 	}
 }
 

@@ -25,13 +25,13 @@ func TestRenderTrustMatrix_HasTitle(t *testing.T) {
 // TestRenderTrustMatrix_HeaderAfterTitle: line 1 is the strategy-letter
 // header row (the title occupies line 0).
 func TestRenderTrustMatrix_HeaderAfterTitle(t *testing.T) {
-	w := world.NewWorldWithConfig(world.Config{Seed: 2, StrategyLetters: []rune{'R', 'S', 'T'}})
+	w := world.NewWorldWithConfig(world.Config{Seed: 2, StrategyLetters: []rune{'R', 'S', 'U'}})
 	lines := renderTrustMatrixLines(w)
 	if len(lines) < 2 {
 		t.Fatal("expected ≥ 2 lines (title + header)")
 	}
 	// Header should list every strategy letter after the 2-space gutter.
-	for _, l := range []rune{'R', 'S', 'T'} {
+	for _, l := range []rune{'R', 'S', 'U'} {
 		if !strings.ContainsRune(lines[1], l) {
 			t.Errorf("header missing letter %c: %q", l, lines[1])
 		}
@@ -66,7 +66,7 @@ func TestRenderTrustMatrix_LegendInline(t *testing.T) {
 func TestRenderTrustMatrix_AlgorithmMatrixAtTop(t *testing.T) {
 	w := world.NewWorldWithConfig(world.Config{
 		Seed:            4,
-		StrategyLetters: []rune{'R', 'S', 'T'},
+		StrategyLetters: []rune{'R', 'S', 'U'},
 	})
 	lines := renderTrustMatrixLines(w)
 	if len(lines) < 2 {
@@ -75,7 +75,7 @@ func TestRenderTrustMatrix_AlgorithmMatrixAtTop(t *testing.T) {
 	if !strings.Contains(lines[0], "Agent-Algorithm Trust") {
 		t.Errorf("expected algorithm title at line 0, got %q", lines[0])
 	}
-	for _, l := range []rune{'R', 'S', 'T'} {
+	for _, l := range []rune{'R', 'S', 'U'} {
 		if !strings.ContainsRune(lines[1], l) {
 			t.Errorf("algorithm header missing %c: %q", l, lines[1])
 		}

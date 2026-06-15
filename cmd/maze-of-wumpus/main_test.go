@@ -107,8 +107,8 @@ func TestWriteHeadlessState_PerAgentFields(t *testing.T) {
 	writeHeadlessState(&buf, w)
 	s := buf.String()
 	for _, want := range []string{
-		"1_alive=", "2_alive=", "3_alive=", "4_alive=", "5_alive=",
-		"1_score=", "2_score=", "3_score=", "4_score=", "5_score=",
+		"1_alive=", "2_alive=", "3_alive=", "4_alive=",
+		"1_score=", "2_score=", "3_score=", "4_score=",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("missing %q in output: %s", want, s)
@@ -276,7 +276,7 @@ func TestRunHeadless_DirectInvoke(t *testing.T) {
 
 func TestBuildWorld_AttachesStrategies(t *testing.T) {
 	w := buildWorld(7)
-	for _, label := range []rune{'1', '2', '3', '4', '5'} {
+	for _, label := range []rune{'1', '2', '3', '4'} {
 		a := w.AgentByLabel(label)
 		if a.Strategy == nil {
 			t.Errorf("agent %c missing strategy", label)

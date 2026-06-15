@@ -18,6 +18,7 @@ package world
 
 import (
 	"math/rand"
+	"sync"
 )
 
 // CellType categorizes every grid cell. Walls block movement; paths are
@@ -88,6 +89,12 @@ type Maze struct {
 	EntrancePos Pos
 	GoalPos     Pos
 	Rooms       []Room
+
+	// Lazily-computed goal-location prior (see goal_belief.go). The
+	// totals depend only on EntrancePos + board dims, both fixed once
+	// the maze is generated, so they're memoized on first use.
+	goalPriorOnce                        sync.Once
+	goalPriorW, goalPriorWX, goalPriorWY float64
 }
 
 // Room is a rectangular open area carved into the maze.
@@ -254,26 +261,81 @@ func carveIrregularRoom(m *Maze, rng *rand.Rand) *Room {
 // qualifying candidates. Falls back to (BoardWidth-2, BoardHeight-2)
 // (the legacy diametric corner) if no candidate qualifies.
 func pickRandomGoal(m *Maze, entrance Pos, rng *rand.Rand) Pos {
-	var candidates []Pos
+	// Flood-fill the cells an agent can actually reach from the entrance,
+	// under the SAME movement model the rest of the engine uses (8-conn
+	// Moore, corner-clipping enforced). The goal is chosen only from this
+	// set, so it can never land in an isolated open pocket — every
+	// generated maze stays solvable by construction.
+	reachable := reachableFrom(m, entrance)
+
+	// Candidates: reachable cells at least MinGoalDistanceCells away,
+	// scanned in deterministic row-major order so the rng pick is
+	// reproducible for a given seed.
+	var far []Pos
 	for y := 0; y < BoardHeight; y++ {
 		for x := 0; x < BoardWidth; x++ {
 			p := Pos{X: x, Y: y}
-			if p == entrance {
-				continue
-			}
-			if !m.IsWalkable(p) {
+			if p == entrance || !reachable[p] {
 				continue
 			}
 			if absInt(x-entrance.X)+absInt(y-entrance.Y) < MinGoalDistanceCells {
 				continue
 			}
-			candidates = append(candidates, p)
+			far = append(far, p)
 		}
 	}
-	if len(candidates) == 0 {
-		return Pos{X: BoardWidth - 2, Y: BoardHeight - 2}
+	if len(far) > 0 {
+		return far[rng.Intn(len(far))]
 	}
-	return candidates[rng.Intn(len(candidates))]
+
+	// No reachable cell satisfies the distance floor (a small reachable
+	// region): fall back to the reachable cell FARTHEST from the entrance.
+	// It's still guaranteed reachable, so the maze stays solvable even if
+	// the goal ends up closer than the preferred minimum.
+	best := entrance
+	bestD := -1
+	for y := 0; y < BoardHeight; y++ {
+		for x := 0; x < BoardWidth; x++ {
+			p := Pos{X: x, Y: y}
+			if p == entrance || !reachable[p] {
+				continue
+			}
+			if d := absInt(x-entrance.X) + absInt(y-entrance.Y); d > bestD {
+				bestD = d
+				best = p
+			}
+		}
+	}
+	return best // entrance itself if nothing else is reachable (trivially solvable)
+}
+
+// reachableFrom returns the set of cells reachable from `start` over
+// walkable cells using the engine's 8-connected, corner-clipped movement
+// model — the same connectivity CountShortestPaths and AStarPath use, so
+// "reachable" here means "an agent can actually get there."
+func reachableFrom(m *Maze, start Pos) map[Pos]bool {
+	reachable := map[Pos]bool{}
+	if !m.IsWalkable(start) {
+		return reachable
+	}
+	reachable[start] = true
+	queue := []Pos{start}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		for _, d := range Cardinals {
+			np := Pos{X: cur.X + d.X, Y: cur.Y + d.Y}
+			if reachable[np] || !m.IsWalkable(np) {
+				continue
+			}
+			if m.IsCornerClipped(cur, np) {
+				continue
+			}
+			reachable[np] = true
+			queue = append(queue, np)
+		}
+	}
+	return reachable
 }
 
 func absInt(x int) int {

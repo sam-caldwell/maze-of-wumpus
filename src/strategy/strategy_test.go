@@ -68,7 +68,7 @@ func TestSwarmBayesian_IgnoresNonSwarmPeers(t *testing.T) {
 	a := world.SpawnAgentForTest(w, '3')
 	b := world.SpawnAgentForTest(w, '4')
 	a.CurrentStrategy = StrategySwarmBayesian
-	b.CurrentStrategy = StrategyBayesian // NOT S
+	b.CurrentStrategy = StrategyPOMCP // NOT S
 	a.KnownCells = map[world.Pos]bool{}
 	b.KnownCells = map[world.Pos]bool{{X: 50, Y: 50}: true}
 	a.Beliefs = world.NewAgentBeliefs()
@@ -84,8 +84,8 @@ func TestSwarmBayesian_IgnoresNonSwarmPeers(t *testing.T) {
 // human-readable NameByLetter entry, and ForLetter('Z') returns
 // nil for unrecognized input.
 func TestStrategyLetters_RegistryComplete(t *testing.T) {
-	if len(StrategyLetters) != 5 {
-		t.Fatalf("StrategyLetters len = %d, want 5", len(StrategyLetters))
+	if len(StrategyLetters) != 4 {
+		t.Fatalf("StrategyLetters len = %d, want 4", len(StrategyLetters))
 	}
 	for _, l := range StrategyLetters {
 		if ForLetter(l) == nil {
@@ -104,7 +104,7 @@ func TestStrategyLetters_RegistryComplete(t *testing.T) {
 }
 
 func TestForLabel_All(t *testing.T) {
-	for _, label := range []rune{'1', '2', '3', '4', '5'} {
+	for _, label := range []rune{'1', '2', '3', '4'} {
 		if ForLabel(label) == nil {
 			t.Errorf("ForLabel(%c) = nil", label)
 		}
@@ -117,10 +117,9 @@ func TestForLabel_All(t *testing.T) {
 func TestName_All(t *testing.T) {
 	want := map[rune]string{
 		'1': "bfs",
-		'2': "bayesian",
-		'3': "swarm-bayesian",
-		'4': "pomcp",
-		'5': "qmdp",
+		'2': "swarm-bayesian",
+		'3': "pomcp",
+		'4': "qmdp",
 		'Z': "unknown",
 	}
 	for label, expected := range want {

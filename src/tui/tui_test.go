@@ -54,7 +54,7 @@ func TestUpdate_QuitKeys(t *testing.T) {
 func TestUpdate_RestartKey_PreservesLearning(t *testing.T) {
 	m := newTestModel(1)
 	bayes := m.World.AgentByLabel('2') // Bayesian
-	qmdp := m.World.AgentByLabel('5')  // QMDP
+	qmdp := m.World.AgentByLabel('4')  // QMDP
 	bayes.Beliefs.Observed[world.Pos{X: 1, Y: 2}] = true
 	qmdp.LearnedTTL = 555
 	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
@@ -65,9 +65,9 @@ func TestUpdate_RestartKey_PreservesLearning(t *testing.T) {
 	if !newWorld.AgentByLabel('2').Beliefs.Observed[world.Pos{X: 1, Y: 2}] {
 		t.Error("Bayesian beliefs did not carry over")
 	}
-	if newWorld.AgentByLabel('5').LearnedTTL != 555 {
+	if newWorld.AgentByLabel('4').LearnedTTL != 555 {
 		t.Errorf("LearnedTTL did not carry over: %d, want 555",
-			newWorld.AgentByLabel('5').LearnedTTL)
+			newWorld.AgentByLabel('4').LearnedTTL)
 	}
 }
 
@@ -106,11 +106,11 @@ func TestView_PerAgentTTLColumn(t *testing.T) {
 	}
 }
 
-// TestUpdate_AgentToggles: '1'..'5' flips each agent's Disabled flag.
-// All five agents start enabled by default.
+// TestUpdate_AgentToggles: '1'..'4' flips each agent's Disabled flag.
+// All four agents start enabled by default.
 func TestUpdate_AgentToggles(t *testing.T) {
 	m := newTestModel(1)
-	for _, key := range []string{"1", "2", "3", "4", "5"} {
+	for _, key := range []string{"1", "2", "3", "4"} {
 		a := m.World.AgentByLabel(rune(key[0]))
 		if a.Disabled {
 			t.Fatalf("agent %s should default to enabled (Disabled=false)", key)
@@ -351,10 +351,6 @@ func TestGlyphAt_AllCellTypes(t *testing.T) {
 	if m.glyphAt(w, 5, 5) != scent4Glyph {
 		t.Error("scent D glyph mismatch")
 	}
-	w.ScentOwner[5][5] = '5'
-	if m.glyphAt(w, 5, 5) != scent5Glyph {
-		t.Error("scent 5 glyph mismatch")
-	}
 	w.ScentOwner[5][5] = 'Z'
 	if m.glyphAt(w, 5, 5) != pathGlyph {
 		t.Error("unknown scent owner should render as path")
@@ -379,10 +375,6 @@ func TestGlyphAt_AllCellTypes(t *testing.T) {
 	a.Label = '4'
 	if m.glyphAt(w, 5, 5) != agent4Glyph {
 		t.Error("agent D glyph mismatch")
-	}
-	a.Label = '5'
-	if m.glyphAt(w, 5, 5) != agent5Glyph {
-		t.Error("agent 5 glyph mismatch")
 	}
 }
 

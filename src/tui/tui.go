@@ -33,7 +33,6 @@ var (
 	agent2Style = lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true)
 	agent3Style = lipgloss.NewStyle().Foreground(lipgloss.Color("213")).Bold(true)
 	agent4Style = lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Bold(true)
-	agent5Style = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
 	goalStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Background(lipgloss.Color("226")).Bold(true)
 	entranceStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true)
 	ghostStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
@@ -41,7 +40,6 @@ var (
 	scent2Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("51"))
 	scent3Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("213"))
 	scent4Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
-	scent5Style    = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
 	titleStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
 	statStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
 	ttlWarnStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true)
@@ -61,13 +59,11 @@ var (
 	agent2Glyph   = agent2Style.Render("2")
 	agent3Glyph   = agent3Style.Render("3")
 	agent4Glyph   = agent4Style.Render("4")
-	agent5Glyph   = agent5Style.Render("5")
 	goalGlyph     = goalStyle.Render("G")
 	scent1Glyph   = scent1Style.Render("~")
 	scent2Glyph   = scent2Style.Render("~")
 	scent3Glyph   = scent3Style.Render("~")
 	scent4Glyph   = scent4Style.Render("~")
-	scent5Glyph   = scent5Style.Render("~")
 	entranceGlyph = entranceStyle.Render("S") // generic fallback (no per-agent claim)
 
 	// agentEntranceGlyph maps an agent label to a "white agent-rune
@@ -81,7 +77,6 @@ var (
 		'2': "208", // orange
 		'3': "129", // purple
 		'4': "199", // pink-magenta
-		'5': "46",  // bright green
 	}
 	agentEntranceGlyph = func() map[rune]string {
 		out := map[rune]string{}
@@ -831,8 +826,6 @@ func (m Model) glyphAt(w *world.World, x, y int) string {
 			return agent3Glyph
 		case '4':
 			return agent4Glyph
-		case '5':
-			return agent5Glyph
 		}
 	}
 	// Swarm clones: each alive clone renders as a white "*" on the
@@ -884,8 +877,6 @@ func (m Model) glyphAt(w *world.World, x, y int) string {
 			return scent3Glyph
 		case '4':
 			return scent4Glyph
-		case '5':
-			return scent5Glyph
 		}
 		return pathGlyph
 	default:

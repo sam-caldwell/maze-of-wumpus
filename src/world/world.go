@@ -64,7 +64,7 @@ const DefaultSmellRadius = 2
 // to stop propagation. R (omniscient BFS) keeps its perception
 // advantage in maze regions; PO strategies still have to walk to
 // learn what's around the corner.
-const DefaultSightRadius = 100
+const DefaultSightRadius = 10
 
 // TTLMultiplier: an agent dies if its current-attempt ActualDistance
 // exceeds TTLMultiplier × OptimalDistance.
@@ -135,6 +135,14 @@ type Strategy func(*World, *Agent) Pos
 // reasoning over the perceived (strict-PO) map.
 type AgentBeliefs struct {
 	Observed map[Pos]bool
+
+	// Goal-location belief accumulators (see goal_belief.go). These are
+	// the prior-weight contributions of the cells in Observed: the agent
+	// has perceived these cells and found none of them to be the goal, so
+	// their prior mass is subtracted from the board total to yield the
+	// posterior over where the unseen goal still might be. Kept in sync
+	// with Observed exclusively via MarkObserved.
+	ObsW, ObsWX, ObsWY float64
 }
 
 // NewAgentBeliefs returns an empty belief state.
@@ -168,6 +176,17 @@ type AgentStats struct {
 	OnPathSteps   int
 	OffPathSteps  int
 	BestAlignment float64
+
+	// MaxReach is the deepest BFS-distance-from-entrance any of this
+	// agent's lives has reached on the CURRENT map. Unlike MaxStartDist
+	// (reset every respawn) it PERSISTS across deaths and only resets on
+	// reseed (new map → fresh Stats). It funds the TTL "commute credit"
+	// (see TTLCeiling): a partially-observable explorer respawns at the
+	// entrance and must re-traverse already-mapped corridors to get back
+	// to its frontier, so its exploration budget is widened by how far
+	// out that frontier already sits — otherwise it spends every life
+	// commuting and dies (TTL) before exploring an inch of new ground.
+	MaxReach int
 
 	// Solve-time aggregate stats. MinSolveTime / MaxSolveTime are the
 	// shortest and longest TicksAlive observed on any goal-reach.
@@ -662,7 +681,7 @@ type World struct {
 	// the world package never imports strategy/.
 	strategyForLetter func(rune) Strategy
 	// strategyLetters is the canonical list of available strategy
-	// letters (e.g. {'R','S','T','U','V'}). Plumbed via
+	// letters (e.g. {'R','S','U','V'}). Plumbed via
 	// Config.StrategyLetters; used by the legacy PickStrategy path and
 	// the trust-matrix UI.
 	strategyLetters []rune
@@ -762,11 +781,11 @@ func NewWorldWithConfig(cfg Config) *World {
 	// (assigned by label in RespawnAgents). Every agent still gets an
 	// AgentBeliefs slot since the Bayesian / swarm-Bayesian / POMCP /
 	// QMDP planners all reason over it.
-	labels := []rune{'1', '2', '3', '4', '5'}
-	// All five agents spawn simultaneously on the first tick. The
-	// per-agent perimeter entrances (assigned below) already
-	// distribute them across the maze, so we no longer stagger
-	// arrivals — there's no visual clumping at one door to avoid.
+	labels := []rune{'1', '2', '3', '4'}
+	// All agents spawn simultaneously on the first tick. The per-agent
+	// perimeter entrances (assigned below) already distribute them across
+	// the maze, so we no longer stagger arrivals — there's no visual
+	// clumping at one door to avoid.
 	w.Agents = make([]*Agent, 0, len(labels))
 	for _, l := range labels {
 		a := newAgent(&w.nextAgentID, l, stratFor(l), NewAgentBeliefs(), 1)
@@ -869,11 +888,11 @@ func (w *World) pickAgentEntrances(n int) []Pos {
 	type side []Pos
 	sides := make([]side, 4)
 	for x := 1; x < BoardWidth-1; x++ {
-		sides[0] = append(sides[0], Pos{x, 0})              // top
+		sides[0] = append(sides[0], Pos{x, 0})               // top
 		sides[1] = append(sides[1], Pos{x, BoardHeight - 1}) // bottom
 	}
 	for y := 1; y < BoardHeight-1; y++ {
-		sides[2] = append(sides[2], Pos{0, y})             // left
+		sides[2] = append(sides[2], Pos{0, y})              // left
 		sides[3] = append(sides[3], Pos{BoardWidth - 1, y}) // right
 	}
 	for i := range sides {
@@ -1457,7 +1476,16 @@ func (w *World) TTLCeiling(a *Agent) int {
 	if budget <= 0 {
 		return 0
 	}
-	return TTLMultiplier * budget
+	// Commute credit: a partially-observable explorer respawns at the
+	// entrance and must re-traverse already-mapped corridors to reach the
+	// frontier its earlier lives pushed out to (MaxReach steps away). Add
+	// that distance so the generous exploration window (TTLMultiplier ×
+	// optimal) applies to NEW ground rather than being burned commuting —
+	// otherwise a deep frontier means the agent dies before it explores
+	// anything new, making net progress per life zero and large mazes
+	// unsolvable. Zero on the first life (MaxReach == 0), and irrelevant
+	// once solved (the BestSolveDistance branch above takes over).
+	return TTLMultiplier*budget + a.Stats.MaxReach
 }
 
 // MoveAgents drives every live agent through its strategy and commits
@@ -1553,6 +1581,9 @@ func (w *World) MoveAgents() {
 		if curStartDist > a.MaxStartDist {
 			a.PendingBonus += float64(curStartDist-a.MaxStartDist) * RealDistanceShaping
 			a.MaxStartDist = curStartDist
+		}
+		if curStartDist > a.Stats.MaxReach {
+			a.Stats.MaxReach = curStartDist // persists across lives; funds TTL commute credit
 		}
 		walkables := 0
 		for _, dd := range Cardinals {
@@ -1740,6 +1771,15 @@ func (w *World) RespawnAgents() {
 		a.CurrentTrustee = 0
 		a.Pos = entrance
 		a.Plan = nil
+		// Drop any cached route that does NOT actually terminate at the
+		// goal — e.g. a clone region-seed path promoted into this agent on
+		// a prior life. Replaying a non-goal route from the entrance every
+		// life is wasted motion that looks exactly like the agent is stuck
+		// re-walking the same dead path. A genuine solution route (ends at
+		// the goal) is kept so the agent can fast-replay its prior solve.
+		if n := len(a.KnownShortestPath); n > 0 && a.KnownShortestPath[n-1] != w.Maze.GoalPos {
+			a.KnownShortestPath = nil
+		}
 		a.Stats.ActualDistance = 0
 		a.Stats.OnPathSteps = 0
 		a.Stats.OffPathSteps = 0
@@ -1812,9 +1852,9 @@ func (w *World) maintainSwarmMembership(a *Agent) {
 
 // EnforceBenchmarkSingleton caps the omniscient R strategy at
 // MaxBenchmarkAgents (1) alive user at any time. If two or more
-// agents picked R this tick, the extras are demoted to plain
-// Bayesian (T) — keeping the comparison clean by ensuring at most
-// one benchmark runner is in play.
+// agents picked R this tick, the extras are demoted to the
+// swarm-Bayesian strategy S — keeping the comparison clean by
+// ensuring at most one benchmark runner is in play.
 func (w *World) EnforceBenchmarkSingleton() {
 	keptOne := false
 	for _, a := range w.Agents {
@@ -1828,9 +1868,10 @@ func (w *World) EnforceBenchmarkSingleton() {
 			keptOne = true
 			continue
 		}
-		// Demote: T is the closest non-omniscient Bayesian relative
-		// and doesn't require scent perception or a trustee.
-		a.CurrentStrategy = 'T'
+		// Demote to S: the non-omniscient Bayesian strategy. It infers
+		// the goal location under partial observability and needs no
+		// scent perception or trustee.
+		a.CurrentStrategy = SwarmStrategyLetter
 		a.CurrentTrustee = 0
 	}
 }
@@ -2053,7 +2094,7 @@ func (w *World) KillAgent(a *Agent, reason ...string) {
 // retained only so the now-dormant helper functions still compile.
 var (
 	ScentLeaderLabels   = []rune{'1', '2', '3'}
-	ScentFollowerLabels = []rune{'4', '5'}
+	ScentFollowerLabels = []rune{'4'}
 )
 
 // ScentRunsForTrustWeighting: how many initial runs the agent makes

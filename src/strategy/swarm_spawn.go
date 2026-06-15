@@ -263,7 +263,7 @@ type spawnPolicy func(w *world.World, a *world.Agent, branches []world.Pos, free
 // spawnPolicyFor maps a swarm letter to its per-algorithm fork policy.
 func spawnPolicyFor(letter rune) spawnPolicy {
 	switch letter {
-	case StrategySwarmBayesian, StrategyBayesian:
+	case StrategySwarmBayesian:
 		return bayesianSpawnPolicy
 	case StrategyPOMCP:
 		return pomcpSpawnPolicy

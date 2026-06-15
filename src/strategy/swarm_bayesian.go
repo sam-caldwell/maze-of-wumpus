@@ -46,7 +46,7 @@ func mergeSwarmKnowledge(w *world.World, a *world.Agent) {
 			continue
 		}
 		for p := range peer.Beliefs.Observed {
-			a.Beliefs.Observed[p] = true
+			a.Beliefs.MarkObserved(w.Maze, p)
 		}
 	}
 }

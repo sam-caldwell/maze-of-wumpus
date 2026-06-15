@@ -12,7 +12,7 @@ import (
 // rule.
 func TestPlanFor_DispatchesPerAlgorithm(t *testing.T) {
 	for _, l := range []rune{
-		StrategySwarmBayesian, StrategyBayesian, StrategyPOMCP, StrategyQMDP,
+		StrategySwarmBayesian, StrategyPOMCP, StrategyQMDP,
 	} {
 		if planFor(l) == nil {
 			t.Errorf("planFor(%c) = nil, want a planner", l)
@@ -25,7 +25,7 @@ func TestPlanFor_DispatchesPerAlgorithm(t *testing.T) {
 func TestSwarmStrategy_SharesKnowledge(t *testing.T) {
 	w := newConfiguredWorld(24)
 	a := world.SpawnAgentForTest(w, '4')
-	b := world.SpawnAgentForTest(w, '5')
+	b := world.SpawnAgentForTest(w, '3')
 	a.CurrentStrategy = StrategyQMDP
 	b.CurrentStrategy = StrategyQMDP
 	a.SwarmGroupID = 5
@@ -46,7 +46,7 @@ func TestSwarmStrategy_SharesKnowledge(t *testing.T) {
 // roster (freeing a slot for future lazy forking — no auto-respawn).
 func TestSwarmClone_ThrashTerminatesAndFreesSlot(t *testing.T) {
 	w := newConfiguredWorld(26)
-	a := world.SpawnAgentForTest(w, '5')
+	a := world.SpawnAgentForTest(w, '4')
 	a.CurrentStrategy = StrategyQMDP
 	a.SwarmGroupID = 1
 	a.Pos = world.Pos{X: 40, Y: 40}
@@ -75,7 +75,7 @@ func TestSwarmClone_ThrashTerminatesAndFreesSlot(t *testing.T) {
 // aggregate, and not the leader's.
 func TestSwarmClone_ExpiresOnIndividualDistance(t *testing.T) {
 	w := newConfiguredWorld(50)
-	a := world.SpawnAgentForTest(w, '5')
+	a := world.SpawnAgentForTest(w, '4')
 	a.CurrentStrategy = StrategyQMDP
 	a.SwarmGroupID = 1
 	a.OptimalDistance = 10 // limit = TTLMultiplier*10 = 30
@@ -123,7 +123,7 @@ func TestSwarmClone_DistinctTrailNotThrashing(t *testing.T) {
 // sharing among leader and clones" requirement.
 func TestSwarmClone_SharesPerceptionWithLeader(t *testing.T) {
 	w := newConfiguredWorld(28)
-	a := world.SpawnAgentForTest(w, '5')
+	a := world.SpawnAgentForTest(w, '4')
 	a.CurrentStrategy = StrategyQMDP
 	a.SwarmGroupID = 1
 	a.Beliefs = world.NewAgentBeliefs()
@@ -154,34 +154,62 @@ func TestSwarmHasSolution(t *testing.T) {
 	if swarmHasSolution(w, a) {
 		t.Error("no route known yet — should be exploring")
 	}
-	// Goal perceived → a route can be planned → solution exists.
+	// Merely PERCEIVING the goal cell is NOT a solution — there may be no
+	// known walkable route to it. Exploration must continue (else the
+	// swarm livelocks, believing it's solved when it can't reach the goal).
 	a.KnownCells[w.Maze.GoalPos] = true
-	if !swarmHasSolution(w, a) {
-		t.Error("goal perceived should count as a solution")
+	if swarmHasSolution(w, a) {
+		t.Error("goal perceived but no route known — must keep exploring")
 	}
-	// Cached path (survives respawn) → solution exists even without the
-	// goal in this run's freshly-built KnownCells.
-	delete(a.KnownCells, w.Maze.GoalPos)
+	// A cached path that does NOT terminate at the goal (e.g. a promoted
+	// clone region-seed) is NOT a solution.
 	a.KnownShortestPath = []world.Pos{a.Pos, {X: a.Pos.X + 1, Y: a.Pos.Y}}
+	if swarmHasSolution(w, a) {
+		t.Error("non-goal-terminating cached path must not count as a solution")
+	}
+	// A cached path that TERMINATES at the goal IS a solution (survives
+	// respawn → exploit it instead of re-exploring).
+	a.KnownShortestPath = []world.Pos{a.Pos, w.Maze.GoalPos}
 	if !swarmHasSolution(w, a) {
-		t.Error("cached KnownShortestPath should count as a solution")
+		t.Error("a goal-terminating cached path should count as a solution")
 	}
 }
 
-// TestSwarmStrategy_NoForkOnceGoalPerceived: with the goal already in the
-// pooled KnownCells, a SwarmStrategy tick must not spawn new exploratory
+// TestSwarmStrategy_NoForkOnceRouteKnown: with a cached entrance→goal
+// route in hand, a SwarmStrategy tick must not spawn new exploratory
 // clones (exploitation, not exploration).
-func TestSwarmStrategy_NoForkOnceGoalPerceived(t *testing.T) {
+func TestSwarmStrategy_NoForkOnceRouteKnown(t *testing.T) {
 	w := newConfiguredWorld(32)
 	a := world.SpawnAgentForTest(w, '3')
 	a.CurrentStrategy = StrategySwarmBayesian
 	a.SwarmGroupID = 1
 	a.Beliefs = world.NewAgentBeliefs()
 	a.KnownCells = map[world.Pos]bool{a.Pos: true, w.Maze.GoalPos: true}
+	// A real route to the goal exists (terminates at the goal cell), so the
+	// swarm exploits rather than forks.
+	a.KnownShortestPath = []world.Pos{a.Pos, w.Maze.GoalPos}
 	before := len(a.SwarmClones)
 	SwarmStrategy(w, a)
 	if len(a.SwarmClones) > before {
-		t.Errorf("swarm forked %d clones after the goal was perceived; want none",
+		t.Errorf("swarm forked %d clones after a goal route was known; want none",
 			len(a.SwarmClones)-before)
+	}
+}
+
+// TestSwarmStrategy_ForksWhenGoalPerceivedButUnreachable: perceiving the
+// goal cell without a known route to it must NOT halt exploration — the
+// swarm keeps forking to discover the connecting path (regression guard
+// for the livelock where a perceived-but-unreachable goal froze the swarm).
+func TestSwarmStrategy_ForksWhenGoalPerceivedButUnreachable(t *testing.T) {
+	w := newConfiguredWorld(32)
+	a := world.SpawnAgentForTest(w, '3')
+	a.CurrentStrategy = StrategySwarmBayesian
+	a.SwarmGroupID = 1
+	a.Beliefs = world.NewAgentBeliefs()
+	// Goal perceived, but no cached route reaches it.
+	a.KnownCells = map[world.Pos]bool{a.Pos: true, w.Maze.GoalPos: true}
+	a.KnownShortestPath = nil
+	if swarmHasSolution(w, a) {
+		t.Fatal("perceived-but-unreachable goal must not register as solved")
 	}
 }

@@ -96,17 +96,26 @@ func SwarmStrategy(w *world.World, a *world.Agent) world.Pos {
 	return taken
 }
 
-// swarmHasSolution reports whether the swarm already has a route to the
-// goal: a cached entrance→goal path from a prior solve (KnownShortestPath,
-// which survives respawn for the life of the map) or the goal perceived
-// in the pooled KnownCells this run. Once true, forking exploratory clones
-// down off-solution branches is wasted effort — the members should
-// converge on the known path instead.
+// swarmHasSolution reports whether the swarm already has a real route to
+// the goal: a cached path that actually TERMINATES at the goal cell
+// (KnownShortestPath survives respawn for the life of the map). Once true,
+// forking exploratory clones down off-solution branches is wasted effort —
+// the members should converge on the known path instead.
+//
+// The terminus check is essential. KnownShortestPath can hold a path that
+// does NOT reach the goal — most notably a clone's region-seed (a route to
+// a frontier sector, swarm_spawn.go) that gets promoted into the leader on
+// a clone-promotion and then persists. And merely PERCEIVING the goal cell
+// (a.KnownCells[GoalPos]) does not mean a walkable route to it is known. In
+// both cases the old "len >= 2 or goal perceived" test wrongly reported a
+// solution, halting exploration so the swarm could livelock — re-walking a
+// route that never reaches the goal for the entire (now huge) TTL window.
+// Requiring the path to end at the goal keeps exploration alive until a
+// genuine entrance→goal route exists (seedGoalConvergencePath builds one as
+// soon as the goal is actually reachable through known cells).
 func swarmHasSolution(w *world.World, a *world.Agent) bool {
-	if len(a.KnownShortestPath) >= 2 {
-		return true
-	}
-	return a.KnownCells != nil && a.KnownCells[w.Maze.GoalPos]
+	p := a.KnownShortestPath
+	return len(p) >= 2 && p[len(p)-1] == w.Maze.GoalPos
 }
 
 // planFor maps a swarm letter to its full strategy function — the
@@ -114,12 +123,11 @@ func swarmHasSolution(w *world.World, a *world.Agent) bool {
 // per-agent dead-end prune around the decision. Using the wrapper
 // (rather than the bare inner core) means the prune is scoped to the
 // plan call only, so the member's post-move sensing still writes the
-// shared, persistent KnownCells. S and T both resolve to the Bayesian
-// planner (so they behave near-identically, as intended). R never
-// swarms, so it never reaches here.
+// shared, persistent KnownCells. S resolves to the Bayesian planner. R
+// never swarms, so it never reaches here.
 func planFor(letter rune) world.Strategy {
 	switch letter {
-	case StrategySwarmBayesian, StrategyBayesian:
+	case StrategySwarmBayesian:
 		return BayesianStrategy
 	case StrategyPOMCP:
 		return POMCPStrategy

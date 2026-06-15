@@ -28,10 +28,9 @@ func TestDescriptionByLetter(t *testing.T) {
 func TestName_AllAgentLabels(t *testing.T) {
 	cases := map[rune]string{
 		'1': "bfs",
-		'2': "bayesian",
-		'3': "swarm-bayesian",
-		'4': "pomcp",
-		'5': "qmdp",
+		'2': "swarm-bayesian",
+		'3': "pomcp",
+		'4': "qmdp",
 	}
 	for l, want := range cases {
 		if got := Name(l); got != want {
@@ -48,7 +47,7 @@ func TestName_AllAgentLabels(t *testing.T) {
 // Verifies the function runs to completion and respects PO.
 func TestQMDPStrategy_BasicMove(t *testing.T) {
 	w := newConfiguredWorld(200)
-	a := world.SpawnAgentForTest(w, '5')
+	a := world.SpawnAgentForTest(w, '4')
 	a.Beliefs = world.NewAgentBeliefs()
 	a.KnownCells = map[world.Pos]bool{
 		a.Pos: true,
@@ -79,7 +78,7 @@ func TestQMDPStrategy_BasicMove(t *testing.T) {
 // fires (outwardBiasNeighbor).
 func TestQMDPStrategy_NoKnownNeighborsFallsBack(t *testing.T) {
 	w := newConfiguredWorld(201)
-	a := world.SpawnAgentForTest(w, '5')
+	a := world.SpawnAgentForTest(w, '4')
 	a.Beliefs = world.NewAgentBeliefs()
 	a.KnownCells = map[world.Pos]bool{a.Pos: true} // nothing else
 	got := QMDPStrategy(w, a)
@@ -207,7 +206,7 @@ func TestMergeSwarmKnowledge_DeadPeerSkipped(t *testing.T) {
 func TestBayesianStrategy_AppliesSoloPrune(t *testing.T) {
 	w := newConfiguredWorld(230)
 	a := world.SpawnAgentForTest(w, '3')
-	a.CurrentStrategy = StrategyBayesian
+	a.CurrentStrategy = StrategySwarmBayesian
 	a.Beliefs = world.NewAgentBeliefs()
 	a.KnownCells = map[world.Pos]bool{a.Pos: true}
 	for _, d := range world.Cardinals[:world.CardinalCount] {
@@ -239,7 +238,7 @@ func TestBayesianStrategy_AppliesSoloPrune(t *testing.T) {
 func TestBayesianStrategy_StrictPO_NoGoalLeakWhenUnperceived(t *testing.T) {
 	w := newConfiguredWorld(231)
 	a := world.SpawnAgentForTest(w, '3')
-	a.CurrentStrategy = StrategyBayesian
+	a.CurrentStrategy = StrategySwarmBayesian
 	a.Beliefs = world.NewAgentBeliefs()
 	a.KnownCells = map[world.Pos]bool{a.Pos: true}
 	for _, d := range world.Cardinals[:world.CardinalCount] {
@@ -327,7 +326,7 @@ func TestPrunedView_Cache_SkipsWhenLenUnchanged(t *testing.T) {
 // value after the strategy returns.
 func TestPOMCPStrategy_AppliesSoloPrune(t *testing.T) {
 	w := newConfiguredWorld(241)
-	a := world.SpawnAgentForTest(w, '5')
+	a := world.SpawnAgentForTest(w, '4')
 	a.CurrentStrategy = StrategyPOMCP
 	a.Beliefs = world.NewAgentBeliefs()
 	origCells := a.KnownCells
@@ -344,7 +343,7 @@ func TestPOMCPStrategy_AppliesSoloPrune(t *testing.T) {
 // TestSoloPrune_PreservesPOForW_NoGoalLeak: same PO guard for POMCP.
 func TestSoloPrune_PreservesPOForW_NoGoalLeak(t *testing.T) {
 	w := newConfiguredWorld(243)
-	a := world.SpawnAgentForTest(w, '5')
+	a := world.SpawnAgentForTest(w, '4')
 	a.CurrentStrategy = StrategyPOMCP
 	a.Beliefs = world.NewAgentBeliefs()
 	a.KnownCells = map[world.Pos]bool{a.Pos: true}

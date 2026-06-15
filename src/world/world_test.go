@@ -9,7 +9,7 @@ func TestNewWorld_Generates(t *testing.T) {
 	if w.Maze == nil {
 		t.Fatal("maze nil")
 	}
-	for _, label := range []rune{'1', '2', '3', '4', '5'} {
+	for _, label := range []rune{'1', '2', '3', '4'} {
 		if w.AgentByLabel(label) == nil {
 			t.Errorf("agent %c missing", label)
 		}
@@ -487,7 +487,7 @@ func TestCountShortestPaths_SaturatesAtCap(t *testing.T) {
 // per-journey.
 func TestAgentStrategy_UniversalSlots(t *testing.T) {
 	w := NewWorld(99)
-	for _, l := range []rune{'1', '2', '3', '4', '5'} {
+	for _, l := range []rune{'1', '2', '3', '4'} {
 		a := w.AgentByLabel(l)
 		if a == nil {
 			t.Fatalf("missing agent %c", l)

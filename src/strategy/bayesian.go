@@ -135,18 +135,35 @@ func wwBFS(w *world.World, a *world.Agent, from, to world.Pos, strict bool) []wo
 	})
 }
 
+// frontierCandidateCap bounds how many of the nearest perception-
+// boundary cells the frontier search collects before scoring. The BFS
+// yields them nearest-first, so this is a local choice set: enough to
+// steer toward the believed goal (and away from swarm-mates) without
+// sweeping the whole known map every tick.
+const frontierCandidateCap = 24
+
 // wwNearestSafeFrontier walks the safe-set BFS from the agent's
-// current cell and returns the nearest safe cell on the *perception
-// boundary* — a perceived (in a.KnownCells) walkable cell that has
-// at least one neighbor the agent has NOT perceived. Walking there
-// expands the agent's KnownCells past the current sight horizon.
+// current cell, collects the nearest cells on the *perception
+// boundary* — perceived (in a.KnownCells) walkable cells with at least
+// one neighbor the agent has NOT perceived — and returns the BEST one
+// to head for. Walking to a boundary cell expands the agent's
+// KnownCells past the current sight horizon.
 //
-// Under sight=10 this is much sparser than "any safe unvisited cell"
-// (the previous semantics): interior perceived cells are skipped
-// because no new perception is gained from stepping onto them.
-// Combined with the per-agent prune (RecomputeAgentPrunedViewIfStale)
-// this stops the agent from threading through already-perceived
-// dead-ends just because it hasn't physically stood on them.
+// "Best" is the cell that maximizes expected progress under the
+// goal-location belief (world/goal_belief.go): among the local choice
+// set, prefer the boundary cell nearest the expected goal location, so
+// exploration is pulled toward the region the goal probably occupies
+// rather than the merely-closest unknown. When the agent has swarm
+// peers and the goal isn't perceived yet, a secondary dispersion term
+// nudges members apart so the team fans out across that region instead
+// of piling onto one frontier.
+//
+// Under sight=10 the boundary set is much sparser than "any safe
+// unvisited cell": interior perceived cells are skipped because no new
+// perception is gained from stepping onto them. Combined with the
+// per-agent prune (RecomputeAgentPrunedViewIfStale) this stops the
+// agent from threading through already-perceived dead-ends just because
+// it hasn't physically stood on them.
 func wwNearestSafeFrontier(w *world.World, a *world.Agent) (world.Pos, bool) {
 	if a.Beliefs == nil {
 		return world.Pos{}, false
@@ -165,14 +182,8 @@ func wwNearestSafeFrontier(w *world.World, a *world.Agent) (world.Pos, bool) {
 	}
 	queue := []world.Pos{a.Pos}
 	visited := map[world.Pos]bool{a.Pos: true}
-	// Swarm dispersion: when this agent has swarm peers (and the goal
-	// isn't perceived yet), collect the nearest handful of safe
-	// frontier cells and head for the one FARTHEST from swarm-mates,
-	// so members fan out. Solo agents keep the original behavior:
-	// return the very first (nearest) safe frontier.
-	disperse := len(a.SwarmPeers) > 0 && !(a.KnownCells != nil && a.KnownCells[w.Maze.GoalPos])
 	var candidates []world.Pos
-	for len(queue) > 0 {
+	for len(queue) > 0 && len(candidates) < frontierCandidateCap {
 		cur := queue[0]
 		queue = queue[1:]
 		for _, d := range world.Cardinals {
@@ -186,38 +197,141 @@ func wwNearestSafeFrontier(w *world.World, a *world.Agent) (world.Pos, bool) {
 			if !wwCellOK(w, a, np) {
 				continue
 			}
+			visited[np] = true
 			if isPerceptionBoundary(np) {
-				if !disperse {
-					return np, true
-				}
 				candidates = append(candidates, np)
-				visited[np] = true
-				if len(candidates) >= 8 {
-					return farthestFromPeers(a, candidates), true
-				}
 				continue
 			}
-			visited[np] = true
 			queue = append(queue, np)
 		}
 	}
-	if len(candidates) > 0 {
-		return farthestFromPeers(a, candidates), true
+	if len(candidates) == 0 {
+		return world.Pos{}, false
 	}
-	return world.Pos{}, false
+	return bestFrontierForGoalBelief(w, a, candidates), true
+}
+
+// goalPullWeight / dispersionWeight balance the two competing pulls on a
+// swarm member's frontier choice. They act on MIN-MAX NORMALIZED terms
+// (see below), so equal weights really do mean equal influence — members
+// steer toward the goal region AND fan out across distinct frontiers.
+const (
+	goalPullWeight   = 1.0
+	dispersionWeight = 1.0
+)
+
+// bestFrontierForGoalBelief scores frontier candidates and returns the
+// one maximizing expected progress: a goal-pull term (proximity to the
+// believed goal location) plus, for swarm members still hunting the
+// goal, a dispersion term (distance from swarm-mates).
+//
+// Both terms are min-max normalized to [0,1] ACROSS THE CANDIDATE SET
+// before they're combined. This matters: the raw goal distance is to a
+// far centroid (hundreds of cells) while peers sit right next to the
+// member (tens), so combining the raw values lets goal-pull swamp
+// dispersion and the whole swarm collapses onto a single path. Normalized,
+// the two compete on equal footing — the member heads toward the goal
+// region but picks a frontier the others aren't already taking.
+//
+// When the goal belief is exhausted (essentially everything observed —
+// the goal is surely perceived by now) the goal-pull term drops out and
+// behavior reduces to the prior nearest/farthest-from-peers selection.
+func bestFrontierForGoalBelief(w *world.World, a *world.Agent, candidates []world.Pos) world.Pos {
+	expectedGoal, haveGoalBelief := w.ExpectedGoalLocation(a)
+	goalPerceived := a.KnownCells != nil && a.KnownCells[w.Maze.GoalPos]
+	disperse := len(a.SwarmPeers) > 0 && !goalPerceived
+
+	if !haveGoalBelief {
+		if disperse {
+			return farthestFromPeers(a, candidates)
+		}
+		return candidates[0] // nearest
+	}
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+
+	// First pass: raw goal distance (want small) and summed peer distance
+	// (want large) per candidate, plus the min/max of each for normalizing.
+	goalDist := make([]int, len(candidates))
+	peerDist := make([]int, len(candidates))
+	var gMin, gMax, pMin, pMax int
+	for i, c := range candidates {
+		gd := chebDist(c, expectedGoal)
+		pd := 0
+		if disperse {
+			for _, p := range a.SwarmPeers {
+				pd += chebDist(c, p)
+			}
+		}
+		goalDist[i], peerDist[i] = gd, pd
+		if i == 0 || gd < gMin {
+			gMin = gd
+		}
+		if i == 0 || gd > gMax {
+			gMax = gd
+		}
+		if i == 0 || pd < pMin {
+			pMin = pd
+		}
+		if i == 0 || pd > pMax {
+			pMax = pd
+		}
+	}
+
+	norm := func(v, lo, hi int) float64 {
+		if hi == lo {
+			return 0
+		}
+		return float64(v-lo) / float64(hi-lo)
+	}
+	best := candidates[0]
+	bestScore := 0.0
+	for i, c := range candidates {
+		// goalScore: 1 == closest to the believed goal.
+		score := goalPullWeight * (1 - norm(goalDist[i], gMin, gMax))
+		if disperse {
+			// dispScore: 1 == farthest from swarm-mates.
+			score += dispersionWeight * norm(peerDist[i], pMin, pMax)
+		}
+		if i == 0 || score > bestScore {
+			bestScore = score
+			best = c
+		}
+	}
+	return best
+}
+
+// chebDist is the Chebyshev (king-move) distance between two cells,
+// matching the engine's 8-connected Moore movement model.
+func chebDist(a, b world.Pos) int {
+	dx := a.X - b.X
+	if dx < 0 {
+		dx = -dx
+	}
+	dy := a.Y - b.Y
+	if dy < 0 {
+		dy = -dy
+	}
+	if dx > dy {
+		return dx
+	}
+	return dy
 }
 
 // UpdateAgentBeliefs marks the agent's current cell (and its
 // perceived Moore neighbors) as Observed. With hazards removed there
-// is no longer any pit/wumpus inference to perform; the Observed
-// bookkeeping is retained so callers that gate on it still behave.
+// is no longer any pit/wumpus inference to perform, but the Observed
+// set still drives the goal-location belief: every newly-perceived
+// cell is a cell the goal is NOT in, so MarkObserved subtracts its
+// prior mass from the posterior (see world/goal_belief.go).
 func UpdateAgentBeliefs(w *world.World, a *world.Agent) {
 	if a.Beliefs == nil {
 		return
 	}
 	b := a.Beliefs
 	p := a.Pos
-	b.Observed[p] = true
+	b.MarkObserved(w.Maze, p)
 	for dy := -1; dy <= 1; dy++ {
 		for dx := -1; dx <= 1; dx++ {
 			if dx == 0 && dy == 0 {
@@ -227,7 +341,7 @@ func UpdateAgentBeliefs(w *world.World, a *world.Agent) {
 			if !world.InBounds(np.X, np.Y) {
 				continue
 			}
-			b.Observed[np] = true
+			b.MarkObserved(w.Maze, np)
 		}
 	}
 }
