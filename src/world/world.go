@@ -1942,8 +1942,27 @@ func (w *World) CheckGoal() {
 		}
 		a.Stats.GoalsReached++
 		t := a.TicksAlive
-		if a.Stats.BestSolveDistance == 0 || a.Stats.ActualDistance < a.Stats.BestSolveDistance {
-			a.Stats.BestSolveDistance = a.Stats.ActualDistance
+		// Compute (and share with peers) the shortest entrance→goal route
+		// through the pooled known terrain BEFORE recording the solve, so
+		// the solve distance reflects the REAL path length. A swarm win can
+		// arrive on a PROMOTED CLONE whose ActualDistance was reset to the
+		// clone's tiny local travel (see KillAgent's body-swap). Recording
+		// that raw ActualDistance would set BestSolveDistance BELOW the true
+		// shortest path; TTLCeiling then tightens the budget below anything
+		// a fresh life (which must walk from the entrance) can achieve, and
+		// every future attempt dies before reaching the goal. Guard against
+		// it by measuring the real route, and never crediting a solve as
+		// shorter than the omniscient optimum.
+		w.optimizeKnownPath(a)
+		solveDist := a.Stats.ActualDistance
+		if k := len(a.KnownShortestPath); k >= 2 && a.KnownShortestPath[k-1] == w.Maze.GoalPos {
+			solveDist = k - 1 // moves along the real entrance→goal route
+		}
+		if a.OptimalDistance > 0 && solveDist < a.OptimalDistance {
+			solveDist = a.OptimalDistance // a solve can never beat the true shortest path
+		}
+		if a.Stats.BestSolveDistance == 0 || solveDist < a.Stats.BestSolveDistance {
+			a.Stats.BestSolveDistance = solveDist
 			a.Stats.BestSolveTime = t
 		}
 		// Roll min / max / avg solve time. Min seeds on first solve.
@@ -1990,11 +2009,9 @@ func (w *World) CheckGoal() {
 		w.recordAgentGoal(a)
 		// Strategy Performance: goal reach bumps the strategy's Wins.
 		w.recordStrategyGoal(a)
-		// Post-win path optimization: BFS through the agent's
-		// perceived terrain to find the shortest entrance→goal
-		// route it could have taken. Subsequent lives consult this
-		// cache before running their native planner.
-		w.optimizeKnownPath(a)
+		// (Path optimization — the entrance→goal route subsequent lives
+		// replay — was already computed above, before the solve distance
+		// was recorded, so that distance reflects the real route.)
 		a.Alive = false
 		if w.AgentAt[a.Pos.Y][a.Pos.X] == a {
 			w.AgentAt[a.Pos.Y][a.Pos.X] = nil
@@ -2698,6 +2715,17 @@ func (w *World) optimizeKnownPath(a *Agent) {
 				continue
 			}
 			if !w.Maze.IsWalkable(np) {
+				continue
+			}
+			// Corner-clip enforcement — must match CanMoveTo, the rule
+			// the agent actually moves under. Cardinals is 8-connected, so
+			// without this the cache can route through a diagonal squeeze
+			// between two walls that the agent physically cannot take. On
+			// replay CanMoveTo rejects that step, the agent derails off the
+			// cached path into a dead end, and (under the tight post-solve
+			// TTL) never recovers. Keeping the cache legally walkable means
+			// CachedStepFor can always replay it.
+			if w.Maze.IsCornerClipped(cur.pos, np) {
 				continue
 			}
 			if _, ok := seen[np]; ok {
